@@ -1,0 +1,2 @@
+﻿FATAL: database system was not properly shut down; automatic recovery not possible
+pg_resetxlog: command not found while attempting database recovery

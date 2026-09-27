@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: devops-ai-copilot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # sync: false means Render prompts for the value and stores it encrypted,
+      # so no secret is ever committed here or baked into the image.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: APP_API_KEY
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: runbooks
+      - key: MIN_MATCH_SCORE
+        value: "0.62"
+      - key: EMBED_MODEL
+        value: gemini-embedding-001
+      - key: EMBED_DIM
+        value: "768"
+      - key: JUDGE_MODEL
+        value: gemini-3.1-flash-lite
+      - key: SYNTH_MODEL
+        value: gemini-3.8-flash
+      - key: FALLBACK_MODELS
+        value: gemini-3.7-flash,gemini-3.1-flash-lite

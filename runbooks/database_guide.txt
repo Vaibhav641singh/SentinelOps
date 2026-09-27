@@ -1,0 +1,143 @@
+INTERNAL RUNBOOK — PostgreSQL Production Incidents
+Owner: Platform Team
+Last reviewed: March 2023
+Applies to: PostgreSQL 12.x on Ubuntu 20.04
+
+
+SECTION 1 — "FATAL: sorry, too many clients already"
+
+Symptom: application logs fill with "FATAL: sorry, too many clients already"
+and new connections are refused while existing sessions keep working.
+
+Cause: every connection to Postgres 12 is a separate OS process. Once
+max_connections is reached the postmaster refuses new ones outright.
+
+Steps:
+
+1. Check how many connections are currently open and what they are doing:
+
+   sudo -u postgres psql -c "SELECT count(*) FROM pg_stat_activity;"
+
+2. Find idle sessions that have been holding a slot for a long time. Anything
+   idle in transaction for more than a few minutes is almost always an
+   application that forgot to commit:
+
+   sudo -u postgres psql -c "SELECT pid, usename, state, query_start FROM pg_stat_activity WHERE state = 'idle in transaction' ORDER BY query_start;"
+
+3. Terminate the worst offenders by pid:
+
+   sudo -u postgres psql -c "SELECT pg_terminate_backend(12345);"
+
+4. Raise the ceiling in /etc/postgresql/12/main/postgresql.conf. On our
+   standard 8 GB app nodes we set:
+
+      max_connections = 100
+      shared_buffers = 2GB
+
+   Restart to apply, since max_connections is not reloadable:
+
+   sudo systemctl restart postgresql@12-main
+
+5. If the application keeps exhausting the pool, put PgBouncer in front of it
+   in transaction pooling mode. Our standard /etc/pgbouncer/pgbouncer.ini is:
+
+      [databases]
+      * = host=127.0.0.1 port=5432
+
+      [pgbouncer]
+      auth_type = md5
+      auth_file = /etc/pgbouncer/userlist.txt
+      pool_mode = transaction
+      max_client_conn = 500
+      default_pool_size = 20
+
+   Generate the userlist entries as md5 hashes:
+
+   sudo -u postgres psql -Atc "SELECT '\"'||usename||'\" \"'||passwd||'\"' FROM pg_shadow;"
+
+   Confirm the server is set to hand out md5 password hashes:
+
+      password_encryption = md5
+
+6. Keep enough WAL on the primary that replicas do not fall off while the
+   connection storm is being cleared. In postgresql.conf:
+
+      wal_keep_segments = 64
+
+   Each segment is 16 MB, so this holds roughly 1 GB of WAL.
+
+7. Reload and confirm the setting took effect:
+
+   sudo -u postgres psql -c "SHOW wal_keep_segments;"
+
+
+SECTION 2 — Disk full on the data volume
+
+Symptom: writes fail with "could not extend file" or "No space left on
+device", and Postgres may refuse to start.
+
+This section is version-independent and still reflects current practice.
+
+Steps:
+
+1. Confirm which mount is actually full before deleting anything:
+
+   df -h /var/lib/postgresql
+
+2. Find the largest consumers inside the data directory:
+
+   sudo du -h --max-depth=2 /var/lib/postgresql | sort -h | tail -20
+
+3. Check the size of each database to see whether the growth is real data:
+
+   sudo -u postgres psql -c "SELECT datname, pg_size_pretty(pg_database_size(datname)) FROM pg_database ORDER BY pg_database_size(datname) DESC;"
+
+4. Never delete files from pg_wal by hand. Removing WAL that has not been
+   archived or replayed will corrupt the cluster. If WAL has accumulated,
+   find out what is holding it back — a failing archive_command, an inactive
+   replication slot, or a stopped replica.
+
+5. Inspect replication slots, which are the most common cause of unbounded
+   WAL growth. A slot with no consumer pins WAL forever:
+
+   sudo -u postgres psql -c "SELECT slot_name, active, restart_lsn FROM pg_replication_slots;"
+
+6. Drop a slot only once you are certain its consumer is gone for good:
+
+   sudo -u postgres psql -c "SELECT pg_drop_replication_slot('old_replica_slot');"
+
+7. Reclaim space from table bloat once the immediate pressure is relieved.
+   VACUUM FULL takes an exclusive lock and needs free space equal to the
+   table, so schedule it in a maintenance window:
+
+   sudo -u postgres psql -d appdb -c "VACUUM (VERBOSE, ANALYZE) large_table;"
+
+
+SECTION 3 — Replica promotion during primary failure
+
+Symptom: the primary is unreachable and the application must be pointed at a
+replica.
+
+Steps:
+
+1. Confirm the replica is actually in recovery and see how far behind it is:
+
+   sudo -u postgres psql -c "SELECT pg_is_in_recovery();"
+
+2. Promote the replica by touching the trigger file configured in
+   recovery.conf:
+
+      promote_trigger_file = '/tmp/postgresql.trigger'
+
+   sudo -u postgres touch /tmp/postgresql.trigger
+
+3. Watch the log until recovery ends and the node accepts writes:
+
+   sudo tail -f /var/log/postgresql/postgresql-12-main.log
+
+4. If the statistics collector misbehaves after promotion, point it at a
+   tmpfs to reduce I/O:
+
+      stats_temp_directory = '/var/run/postgresql/12-main.pg_stat_tmp'
+
+5. Update the application connection string and restart the app tier.

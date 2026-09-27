@@ -1,0 +1,4 @@
+2026-09-27 22:03:11 UTC [31002] LOG:  checkpoint starting: wal
+2026-09-27 22:03:44 UTC [31002] ERROR:  could not extend file "base/16384/2601": No space left on device
+2026-09-27 22:03:44 UTC [31002] HINT:  Check free disk space.
+2026-09-27 22:03:45 UTC [31002] PANIC:  could not write to file "pg_wal/000000010000000000000042": No space left on device

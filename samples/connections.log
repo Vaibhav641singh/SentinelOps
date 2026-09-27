@@ -1,0 +1,5 @@
+2026-09-27 21:14:02 UTC [28841] LOG:  database system is ready to accept connections
+2026-09-27 21:41:55 UTC [29117] FATAL:  sorry, too many clients already
+2026-09-27 21:41:55 UTC [29118] FATAL:  sorry, too many clients already
+2026-09-27 21:41:56 UTC [29119] FATAL:  sorry, too many clients already
+2026-09-27 21:41:58 UTC [29121] FATAL:  sorry, too many clients already

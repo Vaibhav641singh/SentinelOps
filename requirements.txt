@@ -1,0 +1,11 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+qdrant-client==1.19.1
+google-genai==2.23.0
+ddgs==9.16.0
+python-dotenv==1.2.3
+
+# copilot.py — terminal client only; the server does not need these.
+requests==2.34.2
+typer==0.27.2
+rich==15.0.0

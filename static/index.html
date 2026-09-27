@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevOps AI Copilot</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --panel: #ffffff;
+    --border: #e2e1dd;
+    --text: #1d1c1a;
+    --muted: #6d6a64;
+    --accent: #2f6f4e;
+    --warn: #8a5a1b;
+    --warn-bg: #fdf5e7;
+    --ok-bg: #edf5f0;
+    --idle-bg: #f0efec;
+    --code-bg: #1e2227;
+    --code-text: #e6e6e6;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16181a;
+      --panel: #1e2124;
+      --border: #32363b;
+      --text: #e8e8e6;
+      --muted: #9a9894;
+      --accent: #7dc4a0;
+      --warn: #e0b070;
+      --warn-bg: #2a2317;
+      --ok-bg: #1b2621;
+      --idle-bg: #24272b;
+      --code-bg: #111417;
+      --code-text: #e6e6e6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16181a; --panel: #1e2124; --border: #32363b; --text: #e8e8e6;
+    --muted: #9a9894; --accent: #7dc4a0; --warn: #e0b070; --warn-bg: #2a2317;
+    --ok-bg: #1b2621; --idle-bg: #24272b; --code-bg: #111417; --code-text: #e6e6e6;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 0 16px 64px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header { padding: 32px 0 20px; }
+  h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0; }
+  .sub strong { color: var(--text); font-weight: 600; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+  textarea {
+    width: 100%; min-height: 96px; resize: vertical; padding: 11px 12px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  button {
+    font: inherit; font-weight: 600; font-size: 14px; cursor: pointer;
+    padding: 9px 16px; border-radius: 8px; border: 1px solid transparent;
+    background: var(--accent); color: #fff;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .samples { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .samples button {
+    background: transparent; color: var(--muted); border-color: var(--border);
+    font-weight: 500; font-size: 12.5px; padding: 6px 10px;
+  }
+  .samples button:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+
+  /* pipeline */
+  .stages { display: flex; flex-direction: column; gap: 2px; }
+  .stage {
+    display: flex; gap: 10px; align-items: baseline;
+    font-size: 13.5px; padding: 5px 0; color: var(--muted);
+  }
+  .stage .dot {
+    flex: 0 0 auto; width: 16px; text-align: center;
+    font-size: 12px; color: var(--accent);
+  }
+  .stage .t { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-size: 12px; opacity: .65; }
+  .stage b { color: var(--text); font-weight: 600; }
+
+  .badge {
+    display: inline-block; padding: 3px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; background: var(--idle-bg); color: var(--muted);
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--accent); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+
+  .verdict { border-left: 3px solid var(--border); padding-left: 12px; margin-top: 12px; }
+  .verdict.warn { border-left-color: var(--warn); }
+  .verdict.ok { border-left-color: var(--accent); }
+  .verdict p { margin: 4px 0 0; font-size: 13.5px; color: var(--muted); }
+  .findings { list-style: none; padding: 0; margin: 10px 0 0; }
+  .findings li { font-size: 13px; padding: 5px 0; border-top: 1px solid var(--border); }
+  .findings code { font-size: 12.5px; }
+  .findings span { color: var(--muted); }
+
+  .sources { margin: 12px 0 0; padding: 0; list-style: none; }
+  .sources li { font-size: 12.5px; padding: 2px 0; }
+  .sources a { color: var(--accent); text-decoration: none; word-break: break-all; }
+  .sources a:hover { text-decoration: underline; }
+
+  /* answer */
+  .answer { line-height: 1.6; }
+  .answer h2 { font-size: 16px; margin: 20px 0 8px; }
+  .answer h3 { font-size: 14.5px; margin: 18px 0 6px; }
+  .answer p { margin: 8px 0; }
+  .answer ul, .answer ol { margin: 8px 0; padding-left: 22px; }
+  .answer li { margin: 3px 0; }
+  .answer hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
+  .answer :not(pre) > code {
+    background: var(--idle-bg); padding: 1.5px 5px; border-radius: 4px;
+    font: 12.5px ui-monospace, Consolas, monospace;
+  }
+  .answer blockquote {
+    margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--warn);
+    background: var(--warn-bg); color: var(--warn); font-size: 13.5px; border-radius: 0 6px 6px 0;
+  }
+  .answer blockquote p { margin: 0; }
+  .cb { position: relative; margin: 10px 0; }
+  .cb pre {
+    margin: 0; background: var(--code-bg); color: var(--code-text);
+    padding: 12px 14px; border-radius: 8px; overflow-x: auto;
+    font: 12.5px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  .cb button {
+    position: absolute; top: 7px; right: 7px; padding: 3px 9px; font-size: 11px;
+    background: rgba(255,255,255,.12); color: #ddd; border: 0; font-weight: 500;
+  }
+  .cb button:hover { background: rgba(255,255,255,.22); }
+  .caret { display: inline-block; width: 7px; height: 15px; background: var(--accent);
+           vertical-align: text-bottom; animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .err {
+    border-left: 3px solid #b4432f; background: #fdefec; color: #8f2f1f;
+    padding: 10px 12px; border-radius: 0 6px 6px 0; font-size: 13.5px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .err { background: #2b1a17; color: #e79a8a; }
+  }
+  input[type="password"] {
+    flex: 1 1 200px; min-width: 0; padding: 8px 11px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    font: 13px ui-monospace, Consolas, monospace;
+  }
+  input[type="password"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .linkish {
+    background: transparent; color: var(--muted); border-color: var(--border);
+    font-weight: 500; font-size: 12.5px; padding: 6px 10px;
+  }
+  .linkish:hover:not(:disabled) { color: var(--text); }
+  .hint { font-size: 12px; color: var(--muted); }
+  .hide { display: none; }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; padding-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>DevOps AI Copilot</h1>
+    <p class="sub">Paste a server error log. It finds the matching runbook, checks whether that
+    runbook is <strong>still true</strong>, and patches it against the live web when it isn't.
+    Suggestions only &mdash; you run the commands.</p>
+  </header>
+
+  <div class="card">
+    <label for="log">Error log</label>
+    <textarea id="log" spellcheck="false"
+      placeholder="FATAL: sorry, too many clients already"></textarea>
+    <div class="samples" id="samples"></div>
+    <div class="row">
+      <button id="go">Diagnose</button>
+      <span class="badge" id="status">idle</span>
+      <button id="keyBtn" class="linkish hide" title="Change API key">key</button>
+    </div>
+    <div class="row hide" id="keyRow">
+      <input id="key" type="password" placeholder="API key" autocomplete="off">
+      <button id="keySave">Save</button>
+      <span class="hint" id="keyHint">Kept in this tab only, never stored on disk.</span>
+    </div>
+  </div>
+
+  <div class="card hide" id="pipeCard">
+    <label>Pipeline</label>
+    <div class="stages" id="stages"></div>
+    <div id="verdictBox"></div>
+    <div id="sourcesBox"></div>
+  </div>
+
+  <div class="card hide" id="answerCard">
+    <label>Recovery steps</label>
+    <div class="answer" id="answer"></div>
+  </div>
+
+  <footer>Never auto-executes. A human reviews and runs every command.</footer>
+</div>
+
+<script>
+const SAMPLES = [
+  ["Stale runbook", "FATAL: sorry, too many clients already"],
+  ["Current runbook", "PANIC: could not write to file pg_wal/000000010000000000000042: No space left on device"],
+  ["No match", "nginx: [emerg] SSL_CTX_use_PrivateKey_file failed (certificate expired)"],
+];
+
+const $ = id => document.getElementById(id);
+
+/* sessionStorage, not localStorage: the key dies with the tab rather than
+   persisting on disk for anyone who later opens this browser. */
+const KEY_STORE = "copilot_api_key";
+const getKey = () => { try { return sessionStorage.getItem(KEY_STORE) || ""; } catch { return ""; } };
+const setKey = v => { try { v ? sessionStorage.setItem(KEY_STORE, v) : sessionStorage.removeItem(KEY_STORE); } catch {} };
+
+let authRequired = false;
+
+function showKeyRow(msg) {
+  $("keyRow").classList.remove("hide");
+  $("key").value = getKey();
+  if (msg) { $("keyHint").textContent = msg; $("keyHint").style.color = "var(--warn)"; }
+  $("key").focus();
+}
+
+$("keyBtn").onclick = () => $("keyRow").classList.toggle("hide");
+$("keySave").onclick = () => {
+  setKey($("key").value.trim());
+  $("keyHint").textContent = "Saved for this tab.";
+  $("keyHint").style.color = "var(--muted)";
+  $("keyRow").classList.add("hide");
+};
+$("key").addEventListener("keydown", e => { if (e.key === "Enter") $("keySave").click(); });
+
+// Ask /healthz whether auth is on, so the key field only appears when it matters.
+fetch("/healthz").then(r => r.json()).then(h => {
+  authRequired = h.auth === "enabled";
+  if (authRequired) {
+    $("keyBtn").classList.remove("hide");
+    if (!getKey()) showKeyRow("This server requires an API key.");
+  }
+}).catch(() => {});
+const esc = s => s.replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+SAMPLES.forEach(([label, log]) => {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.onclick = () => { $("log").value = log; };
+  $("samples").appendChild(b);
+});
+
+/* Minimal markdown: fenced code, headings, lists, quotes, bold, inline code.
+   Deliberately dependency-free so the page works with no network. */
+function render(md) {
+  const blocks = [];
+  md = md.replace(/```(\w*)\n?([\s\S]*?)(?:```|$)/g, (_, lang, code) => {
+    blocks.push(code.replace(/\n$/, ""));
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+
+  const lines = md.split("\n");
+  let out = "", list = null;
+  const inline = t => esc(t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|\s)\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  const closeList = () => { if (list) { out += `</${list}>`; list = null; } };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    let m;
+    if (/^\u0000\d+\u0000$/.test(line.trim())) {
+      closeList();
+      const i = +line.trim().replace(/\u0000/g, "");
+      out += `<div class="cb"><button data-i="${i}">copy</button><pre>${esc(blocks[i])}</pre></div>`;
+    } else if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      closeList();
+      const lvl = Math.min(m[1].length + 1, 4);
+      out += `<h${lvl}>${inline(m[2])}</h${lvl}>`;
+    } else if (/^(-{3,}|\*{3,})$/.test(line.trim())) {
+      closeList(); out += "<hr>";
+    } else if ((m = line.match(/^>\s?(.*)$/))) {
+      closeList(); out += `<blockquote><p>${inline(m[1])}</p></blockquote>`;
+    } else if ((m = line.match(/^\s*[-*]\s+(.*)$/))) {
+      if (list !== "ul") { closeList(); out += "<ul>"; list = "ul"; }
+      out += `<li>${inline(m[1])}</li>`;
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      if (list !== "ol") { closeList(); out += "<ol>"; list = "ol"; }
+      out += `<li>${inline(m[1])}</li>`;
+    } else if (!line.trim()) {
+      closeList();
+    } else {
+      closeList(); out += `<p>${inline(line)}</p>`;
+    }
+  }
+  closeList();
+  return out;
+}
+
+const LABELS = {
+  retrieving: "Searching runbooks",
+  retrieved: "Runbook matched",
+  judging: "Auditing runbook for staleness",
+  skipped_judge: "Audit skipped",
+  web_search: "Searching the web",
+  web_results: "Web results in",
+  synthesizing: "Writing recovery steps",
+};
+const PATHS = {
+  runbook: ["ok", "runbook is current"],
+  web_patched: ["warn", "patched from web"],
+  no_match: ["", "no matching runbook"],
+};
+
+let t0 = 0;
+function addStage(text) {
+  const d = document.createElement("div");
+  d.className = "stage";
+  d.innerHTML = `<span class="dot">&#10003;</span>
+    <span class="t">${((Date.now() - t0) / 1000).toFixed(1)}s</span><span>${text}</span>`;
+  $("stages").appendChild(d);
+}
+
+$("answer").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-i]");
+  if (!btn) return;
+  navigator.clipboard.writeText(btn.nextElementSibling.textContent).then(() => {
+    btn.textContent = "copied";
+    setTimeout(() => (btn.textContent = "copy"), 1200);
+  });
+});
+
+async function diagnose() {
+  const log = $("log").value.trim();
+  if (!log) { $("log").focus(); return; }
+
+  t0 = Date.now();
+  $("go").disabled = true;
+  document.querySelectorAll("#samples button").forEach(b => (b.disabled = true));
+  $("status").className = "badge";
+  $("status").textContent = "running";
+  $("stages").innerHTML = "";
+  $("verdictBox").innerHTML = "";
+  $("sourcesBox").innerHTML = "";
+  $("answer").innerHTML = "";
+  $("pipeCard").classList.remove("hide");
+  $("answerCard").classList.add("hide");
+
+  let md = "";
+  const paint = () => { $("answer").innerHTML = render(md) + '<span class="caret"></span>'; };
+
+  const handle = (event, data) => {
+    if (event === "stage") {
+      if (data.stage === "retrieved") {
+        addStage(`${LABELS.retrieved}: <b>${esc(data.source)}</b>
+          &middot; score ${data.score}${data.weak_match ? " (too low)" : ""}`);
+      } else if (data.stage === "skipped_judge") {
+        addStage(`${LABELS.skipped_judge} &mdash; match below ${data.threshold}`);
+      } else if (data.stage === "web_search") {
+        addStage(`${LABELS.web_search} &middot; ${data.findings} finding(s)`);
+      } else if (data.stage === "web_results") {
+        const n = (data.per_finding || []).reduce((a, g) => a + g.hits, 0);
+        addStage(`${LABELS.web_results} &middot; ${n} result(s)`);
+      } else {
+        addStage(LABELS[data.stage] || data.stage);
+      }
+    } else if (event === "verdict") {
+      const bad = !data.current;
+      const box = document.createElement("div");
+      box.className = "verdict " + (bad ? "warn" : "ok");
+      box.innerHTML = `<span class="badge ${bad ? "warn" : "ok"}">
+        ${bad ? "outdated" : "still current"}</span><p>${esc(data.reason)}</p>`;
+      if (data.findings?.length) {
+        const ul = document.createElement("ul");
+        ul.className = "findings";
+        data.findings.forEach(f => {
+          const li = document.createElement("li");
+          li.innerHTML = `<code>${esc(f.item)}</code> &mdash; <span>${esc(f.problem)}</span>`;
+          ul.appendChild(li);
+        });
+        box.appendChild(ul);
+      }
+      $("verdictBox").appendChild(box);
+    } else if (event === "token") {
+      if ($("answerCard").classList.contains("hide")) $("answerCard").classList.remove("hide");
+      md += data.text;
+      paint();
+    } else if (event === "done") {
+      $("answer").innerHTML = render(md);
+      const [cls, label] = PATHS[data.path] || ["", data.path];
+      $("status").className = "badge " + cls;
+      $("status").textContent = label;
+      if (data.sources?.length) {
+        const ul = document.createElement("ul");
+        ul.className = "sources";
+        ul.innerHTML = "<li style='color:var(--muted);padding-top:8px'>Web sources consulted</li>" +
+          data.sources.map(u => `<li><a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a></li>`).join("");
+        $("sourcesBox").appendChild(ul);
+      }
+    } else if (event === "error") {
+      $("answerCard").classList.remove("hide");
+      $("answer").innerHTML = `<div class="err">${esc(data.message)}</div>`;
+      $("status").className = "badge warn";
+      $("status").textContent = "failed";
+    }
+  };
+
+  try {
+    const headers = { "Content-Type": "application/json" };
+    const key = getKey();
+    if (key) headers["X-API-Key"] = key;
+
+    const res = await fetch("/diagnose", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ error_log: log }),
+    });
+    if (res.status === 401) {
+      showKeyRow("Key rejected — check it and try again.");
+      throw new Error("Unauthorized: this server requires a valid API key.");
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    // Manual SSE parse: EventSource is GET-only, and this endpoint is a POST.
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop();
+      for (const frame of frames) {
+        let ev = "message", payload = null;
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event: ")) ev = line.slice(7).trim();
+          else if (line.startsWith("data: ")) payload = line.slice(6);
+        }
+        if (payload) handle(ev, JSON.parse(payload));
+      }
+    }
+  } catch (e) {
+    $("answerCard").classList.remove("hide");
+    $("answer").innerHTML = `<div class="err">${esc(String(e))}</div>`;
+    $("status").className = "badge warn";
+    $("status").textContent = "failed";
+  } finally {
+    $("go").disabled = false;
+    document.querySelectorAll("#samples button").forEach(b => (b.disabled = false));
+    document.querySelector(".caret")?.remove();
+  }
+}
+
+$("go").onclick = diagnose;
+$("log").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") diagnose();
+});
+</script>
+</body>
+</html>

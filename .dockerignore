@@ -1,0 +1,25 @@
+# Secrets never enter the image; Render injects them as env vars at runtime.
+.env
+
+# Local-only state
+qdrant_data/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+.git/
+.idea/
+.vscode/
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Client-side and docs — the server image needs none of this
+copilot.py
+setup.py
+samples/
+*.log
+README.md

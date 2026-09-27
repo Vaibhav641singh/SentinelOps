@@ -1,0 +1,16 @@
+.env
+qdrant_data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+*.log
+!samples/*.log
+
+# packaging artifacts from setup.py
+*.egg-info/
+build/
+dist/
