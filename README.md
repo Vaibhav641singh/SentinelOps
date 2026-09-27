@@ -1,4 +1,4 @@
-# DevOps AI Copilot
+# SentinelOps
 
 An on-call assistant that reads a server error log, finds the matching runbook, **checks whether that runbook is still true**, and patches it against the live web when it isn't — then streams back recovery commands for a human to run.
 
