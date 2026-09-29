@@ -1,5 +1,7 @@
 # SentinelOps
 
+**Live:** <https://sentinelops-uq17.onrender.com> — free tier, so the first request after an idle spell takes ~50s to wake the container. `/diagnose` is key-gated; `GET /` and `/healthz` are open.
+
 An on-call assistant that reads a server error log, finds the matching runbook, **checks whether that runbook is still true**, and patches it against the live web when it isn't — then streams back recovery commands for a human to run.
 
 The idea worth caring about: most runbooks rot. A doc written in 2023 confidently tells you to set a config parameter that a later release renamed or removed. This adds a second model that asks *"is this advice still correct?"* before handing it over, and goes looking for a current answer when it isn't.
@@ -32,7 +34,7 @@ Requires Python 3.12+ and a [Gemini API key](https://aistudio.google.com/apikey)
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env        # then put your real GEMINI_API_KEY in it
+cp .env.example .env        # GEMINI_API_KEY is required; set APP_API_KEY too if you want auth on locally
 python -m copilot.ingest            # loads runbooks/ into Qdrant
 uvicorn copilot.api:app --port 8000
 ```
@@ -51,7 +53,7 @@ curl -N -X POST http://localhost:8000/diagnose \
 
 **Browser** — <http://localhost:8000/>. Paste the API key once, then click a preset.
 
-**Terminal** — `copilot.py` is a CLI client that renders the stream as Markdown:
+**Terminal** — `copilot/cli.py` is a CLI client that renders the stream as Markdown:
 
 ```bash
 python -m copilot.cli samples/connections.log        # stale runbook -> patched from web
@@ -79,7 +81,7 @@ Re-run `python -m copilot.ingest` after switching — the collection lives with 
 
 > **Local and Cloud are not quite identical.** Embedded Qdrant filters on any payload field; a Qdrant *server* rejects the same filter with `400 Index required but not found for "source"`. `ingest.py` deletes a file's previous points by filtering on `source`, so it creates a keyword payload index on that field. Worth knowing because it is the one thing that passes locally and fails the moment you point at Cloud.
 
-> **Embedded mode takes an exclusive directory lock.** One process at a time: no `uvicorn --reload`, no `--workers N`. Use a Qdrant server if you want either. `ingest.py` and `app.py` don't collide because they run at different times.
+> **Embedded mode takes an exclusive directory lock.** One process at a time: no `uvicorn --reload`, no `--workers N`. Use a Qdrant server if you want either. `ingest.py` and `api.py` don't collide because they run at different times.
 
 ### Docker
 
@@ -216,5 +218,3 @@ static/index.html   browser UI, no build step
 **Why prompts are files:** they are content, not code. Tuning them shouldn't mean editing a module, and a reviewer can read them without scrolling past backslash-continued string literals.
 
 **Why `errors.py` exists:** so `judge.py` and `research.py` never import FastAPI. Only `api.py` maps a domain error to a status code.
-
-Ingestion is a separate script on purpose: if the app embedded documents at startup, every restart would re-embed everything and burn API quota.
