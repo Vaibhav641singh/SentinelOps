@@ -15,8 +15,20 @@ class JudgeVerdict(BaseModel):
     `findings` is a list rather than one `reason` because a single-reason schema
     let the model stop at the first problem it noticed — a section typically
     rots in several places at once.
+
+    `covers_incident` answers a different question from `current`: not "is this
+    advice stale" but "is this advice even about the right incident". Cosine
+    similarity cannot answer it — a Postgres crash log scores 0.66 against a
+    disk-full section because both are Postgres, not because one fixes the other.
+    See the comment on MIN_MATCH_SCORE in config.py for the measurement.
     """
 
+    covers_incident: bool = Field(
+        description=(
+            "True if this excerpt addresses the incident in the error log. "
+            "False when it is merely about the same system or product."
+        )
+    )
     current: bool = Field(description="True only if NOTHING in the excerpt is outdated")
     reason: str = Field(description="One line summarising the verdict overall")
     findings: list[StaleFinding] = Field(

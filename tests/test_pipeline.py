@@ -2,7 +2,13 @@ import json
 
 from copilot.config import MIN_MATCH_SCORE
 from copilot.models import JudgeVerdict, StaleFinding
-from copilot.pipeline import PATH_NO_MATCH, PATH_RUNBOOK, PATH_WEB_PATCHED, sse
+from copilot.pipeline import (
+    PATH_NO_MATCH,
+    PATH_RUNBOOK,
+    PATH_WEB_PATCHED,
+    choose_path,
+    sse,
+)
 from copilot.research import FAILED, NOT_SEARCHED, Hit, Research, format_research
 
 
@@ -32,24 +38,32 @@ def test_sse_payload_stays_on_one_line():
 
 
 def test_path_selection():
-    def choose(weak: bool, current: bool) -> str:
-        return PATH_NO_MATCH if weak else (PATH_RUNBOOK if current else PATH_WEB_PATCHED)
-
-    assert choose(weak=True, current=True) == PATH_NO_MATCH
-    assert choose(weak=True, current=False) == PATH_NO_MATCH  # weak wins
-    assert choose(weak=False, current=True) == PATH_RUNBOOK
-    assert choose(weak=False, current=False) == PATH_WEB_PATCHED
+    assert choose_path(covered=False, current=True) == PATH_NO_MATCH
+    assert choose_path(covered=False, current=False) == PATH_NO_MATCH  # uncovered wins
+    assert choose_path(covered=True, current=True) == PATH_RUNBOOK
+    assert choose_path(covered=True, current=False) == PATH_WEB_PATCHED
 
 
-def test_relevance_gate_threshold_sits_between_observed_scores():
-    # Measured: on-topic logs 0.74-0.78, unrelated nginx error 0.55.
-    assert 0.57 < MIN_MATCH_SCORE < 0.74
+def test_uncovered_incident_is_no_match_however_current_the_runbook():
+    # pg_crash.log scored 0.6648 against the disk-full section and was reported as
+    # web_patched. It is the same product, not the same incident. Whether that
+    # section is up to date has no bearing on an incident it does not address.
+    assert choose_path(covered=False, current=True) == PATH_NO_MATCH
+
+
+def test_score_floor_is_below_every_observed_on_topic_score():
+    # The floor only rejects obvious garbage; the judge decides coverage. Measured
+    # over 16 queries (scripts/measure_hybrid.py), the lowest on-topic score was
+    # 0.5602 and the highest off-topic was 0.6648 — they overlap, so no threshold
+    # can separate them. The floor must therefore sit UNDER the on-topic minimum,
+    # or it rejects queries the runbook genuinely covers.
+    assert MIN_MATCH_SCORE < 0.5602
 
 
 def test_verdict_with_no_findings_is_treated_as_current():
     # A "stale" verdict with nothing to show for it would send an empty query
     # to the search step.
-    verdict = JudgeVerdict(current=False, reason="vague", findings=[])
+    verdict = JudgeVerdict(covers_incident=True, current=False, reason="vague", findings=[])
     if not verdict.current and not verdict.findings:
         verdict.current = True
     assert verdict.current

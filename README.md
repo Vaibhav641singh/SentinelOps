@@ -124,8 +124,8 @@ The browser UI asks `/healthz` whether auth is on and only shows a key field whe
 
 | Event | Payload |
 |---|---|
-| `stage` | `{"stage":"retrieving"\|"retrieved"\|"judging"\|"web_search"\|"web_results"\|"synthesizing", …}` |
-| `verdict` | `{"current":bool,"reason":str,"findings":[{"item","problem","search_query"}]}` |
+| `stage` | `{"stage":"retrieving"\|"retrieved"\|"skipped_judge"\|"judging"\|"not_covered"\|"web_search"\|"web_results"\|"synthesizing", …}` |
+| `verdict` | `{"covers_incident":bool,"current":bool,"reason":str,"findings":[{"item","problem","search_query"}]}` |
 | `token` | `{"text":"…"}` — incremental synthesis output |
 | `done` | `{"path":"runbook"\|"web_patched"\|"no_match","findings":[…],"sources":[…]}` |
 | `error` | `{"message":"…"}` |
@@ -145,15 +145,29 @@ All of `.env`. Model IDs live here deliberately — Gemini model strings change 
 | `JUDGE_MODEL` | `gemini-3.1-flash-lite` | cheap; thinking disabled |
 | `SYNTH_MODEL` | `gemini-3.8-flash` | |
 | `FALLBACK_MODELS` | `gemini-3.7-flash,gemini-3.1-flash-lite` | tried in order on 503/429 |
-| `MIN_MATCH_SCORE` | `0.62` | below this, skip the audit — see below |
+| `MIN_MATCH_SCORE` | `0.55` | floor only; the judge decides coverage — see below |
 
 ### The relevance gate
 
 Retrieval always returns *something*, even for a log no runbook covers. Without a floor, the pipeline would audit whatever came back and burn web searches on staleness irrelevant to the incident — an nginx SSL error retrieved the Postgres runbook and triggered searches for `wal_keep_segments`, then labelled the answer `web_patched` as though it had corrected something useful.
 
-So a chunk scoring below `MIN_MATCH_SCORE` short-circuits: no judge, no search, `path: "no_match"`. Synthesis still runs, told the match was weak, so it gives an honest "this runbook doesn't cover your error" rather than stretching.
+**This used to be one cosine threshold, and that was wrong.** `MIN_MATCH_SCORE` was 0.62, and it was asked to decide relevance by itself. Measured over 16 queries with `scripts/measure_hybrid.py`, the two populations overlap:
 
-Measured on this runbook: on-topic logs land at **0.74–0.78**, the unrelated nginx error at **0.55**. `0.62` sits in that gap. Re-measure if you swap the embedding model or change chunking — the number is not portable.
+| | dense top-1 |
+|---|---|
+| on-topic | 0.5602 – 0.7706 |
+| off-topic | 0.5621 – **0.6648** |
+
+No threshold separates them. The best any single value achieves is 14/16, which 0.62 already hit — tuning the number was exhausted, not under-tried. Both failures are semantic rather than numeric:
+
+- `samples/pg_crash.log` scores **0.6648** against the disk-full section. It is a crash-recovery incident; the section is about disk space. It scores high because both are Postgres.
+- A short on-topic query (`password_encryption md5 no longer accepted`) scores **0.5602** and was refused, though SECTION 1 covers it on line 60. Short queries simply sit lower against long chunks.
+
+Cosine measures topic, not coverage. So coverage moved to the judge, which reads both the log and the excerpt and returns `covers_incident` alongside `current`. This costs no extra API call — it is one more field on a verdict already being requested.
+
+`MIN_MATCH_SCORE` dropped to **0.55** and is now only a floor: below it the chunk is obvious garbage and not worth a judge call. Above it, the judge decides. Either way an uncovered incident yields `path: "no_match"`, no web searches, and synthesis told to say plainly that the library does not cover the error.
+
+Keep the floor **below** the lowest observed on-topic score, or it starts rejecting queries the runbook does cover — `tests/test_pipeline.py` asserts exactly that. Re-measure with `scripts/measure_hybrid.py` if you swap the embedding model or change chunking; these numbers are not portable.
 
 ## Risks & honest limitations
 
@@ -172,7 +186,9 @@ The fix was an explicit test — *"would this line actually break on a supported
 
   It is still not 100%. So the merge step is told explicitly that the audit's note is a detection hint, not an authority on the fix — where the web sources disagree with it, the web wins.
 
-**Tuning the threshold is the work.** If you change the runbook, re-check both directions: that a stale section trips, *and* that a current one doesn't.
+**Tuning the threshold is the work.** If you change the runbook, re-check both directions: that a stale section trips, *and* that a current one doesn't. Run `scripts/measure_hybrid.py` rather than eyeballing one log — a single threshold looked fine for months against four sample logs and fell apart the moment it was measured against sixteen queries.
+
+**Coverage now rests on the judge, which moves a known-imperfect model onto the refusal path.** The relevance floor is deliberately too low to catch a topical near-miss, so if the judge wrongly returns `covers_incident: true` the engineer gets advice for the wrong incident, and if it wrongly returns false they get a refusal for an incident the library does cover. The prompt leans against the second — a false refusal throws away a usable answer — which means the first is the likelier failure. Synthesis is the remaining backstop: it is told to say plainly when the excerpt does not cover the error rather than invent commands.
 
 **Never auto-execute the output.** A human reads and runs the commands. An AI that pulls a "fix" off the open web and runs it against a production database is how you delete a company. This is a copilot that advises, not an autopilot that acts.
 
@@ -205,6 +221,7 @@ copilot/
 └─ cli.py           terminal client
 
 prompts/*.md        every prompt, as readable text rather than Python literals
+scripts/            measure_hybrid.py — retrieval benchmark, read-only, not shipped
 tests/              chunking, normalization, SSE framing, prompt assembly
 runbooks/           the corpus — one deliberately outdated Postgres runbook
 samples/*.log       example error logs, one per path

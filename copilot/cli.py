@@ -33,6 +33,7 @@ TIMEOUTS = (10, 300)
 STAGE_LABELS = {
     "retrieving": "Searching runbooks",
     "judging": "Auditing runbook for staleness",
+    "not_covered": "Runbook does not cover this incident",
     "web_search": "Searching the web",
     "synthesizing": "Writing recovery steps",
 }

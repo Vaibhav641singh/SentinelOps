@@ -28,6 +28,17 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def choose_path(covered: bool, current: bool) -> str:
+    """Which of the three answers the caller is getting.
+
+    `covered` folds together both ways the library can fail to cover an incident:
+    the score floor, and the judge's own reading of the excerpt.
+    """
+    if not covered:
+        return PATH_NO_MATCH
+    return PATH_RUNBOOK if current else PATH_WEB_PATCHED
+
+
 async def diagnose_events(error_log: str) -> AsyncIterator[str]:
     """Run the pipeline, yielding one SSE frame per stage.
 
@@ -70,10 +81,14 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
             },
         )
 
-        verdict = JudgeVerdict(current=True, reason="Skipped: no runbook matched closely enough.")
+        verdict = JudgeVerdict(
+            covers_incident=False,
+            current=True,
+            reason="Skipped: no runbook matched closely enough.",
+        )
         if weak:
-            # Skip the audit entirely — auditing an irrelevant runbook wastes
-            # searches. Synthesis still runs so the refusal is the model's own.
+            # Below the floor the chunk is obvious garbage, not worth a judge call.
+            # Synthesis still runs so the refusal is the model's own.
             yield sse(
                 "stage",
                 {"stage": "skipped_judge", "why": "weak_match", "threshold": MIN_MATCH_SCORE},
@@ -85,9 +100,18 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
             )
             yield sse("verdict", verdict.model_dump())
 
+        # Coverage is the judge's call above the floor. Cosine cannot answer it:
+        # measured, on-topic and off-topic scores overlap (see config.MIN_MATCH_SCORE).
+        covered = not weak and verdict.covers_incident
+        if not weak and not covered:
+            yield sse(
+                "stage",
+                {"stage": "not_covered", "why": "judge", "reason": verdict.reason},
+            )
+
         research = None
         sources: list[str] = []
-        if not verdict.current:
+        if covered and not verdict.current:
             yield sse(
                 "stage",
                 {
@@ -109,11 +133,11 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
                 },
             )
 
-        path = PATH_NO_MATCH if weak else (PATH_RUNBOOK if verdict.current else PATH_WEB_PATCHED)
+        path = choose_path(covered, verdict.current)
         yield sse("stage", {"stage": "synthesizing", "path": path})
 
         async for text in synthesize_stream(
-            gemini, error_log, chunk, source, research=research, weak=weak
+            gemini, error_log, chunk, source, research=research, weak=not covered
         ):
             yield sse("token", {"text": text})
 

@@ -39,8 +39,12 @@ async def judge_runbook(
 
     if not isinstance(verdict, JudgeVerdict):
         # An unreadable verdict degrades to plain runbook advice rather than
-        # firing a pointless web search.
-        return JudgeVerdict(current=True, reason="Judge returned no usable verdict.")
+        # firing a pointless web search. It assumes coverage: retrieval already
+        # cleared the floor, and refusing on a parse failure would turn a model
+        # glitch into "no runbook covers this", which is a lie the engineer acts on.
+        return JudgeVerdict(
+            covers_incident=True, current=True, reason="Judge returned no usable verdict."
+        )
 
     # A verdict claiming staleness with nothing to show for it would send an
     # empty query to the search step, so trust the findings over the boolean.

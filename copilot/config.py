@@ -40,11 +40,24 @@ FALLBACK_MODELS = [
     if m.strip()
 ]
 
-# Below this cosine score the retrieved chunk counts as "nothing really matched".
-# Auditing an irrelevant runbook wastes web searches on staleness with no bearing
-# on the incident, and calling that result "web_patched" is actively misleading.
-# Observed: on-topic logs score 0.74-0.78, an unrelated nginx error scored 0.55.
-MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
+# A conservative floor, not a relevance classifier. Below this the chunk is obvious
+# garbage and not worth a judge call; everything above it goes to the judge, which
+# decides coverage via JudgeVerdict.covers_incident.
+#
+# This used to be 0.62 and was asked to decide relevance on its own. It cannot.
+# Measured over 16 queries (scripts/measure_hybrid.py), the two populations overlap:
+#
+#   on-topic  dense top1: 0.5602 .. 0.7706
+#   off-topic dense top1: 0.5621 .. 0.6648   <- overlaps by 0.1046
+#
+# No threshold separates them. The best any single value achieves is 14/16, which
+# 0.62 already hit, so tuning the number was exhausted. The two failures are
+# semantic: pg_crash.log scores 0.6648 because it is *about Postgres*, not because
+# the disk-full section fixes it, while a short on-topic query scored 0.5602 purely
+# because short queries sit lower against long chunks. Cosine measures topic, not
+# coverage, so coverage moved to the judge and this dropped to a floor that only
+# catches the genuinely unrelated.
+MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.55"))
 
 # Each finding costs a web search. The judge orders findings by severity, so the
 # tail is the cheapest thing to drop.
