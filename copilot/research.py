@@ -15,6 +15,7 @@ from google.genai import types
 from .clients import with_failover
 from .config import MAX_SEARCHES, SYNTH_MODEL
 from .models import StaleFinding
+from .sanitize import cap, redact
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,14 @@ DDG = "ddgs"
 GROUNDING = "gemini_grounding"
 FAILED = "failed"
 NOT_SEARCHED = "not_searched"
+
+# A targeted search for one stale parameter needs a handful of words. Anything
+# longer is the judge having copied a span of the log into the query.
+MAX_QUERY_CHARS = 200
+# Third-party strings rendered into the merge prompt. The snippet was already
+# capped; title and url were not, and a long enough one is its own payload.
+MAX_TITLE_CHARS = 200
+MAX_URL_CHARS = 400
 
 
 @dataclass
@@ -53,7 +62,11 @@ async def web_search(gemini: genai.Client, query: str, max_results: int = 5) -> 
         # ddgs is blocking; calling it directly would stall the event loop.
         raw = await asyncio.to_thread(_ddg_search, query, max_results)
         hits = [
-            Hit(r.get("title", ""), r.get("href", ""), r.get("body", ""))
+            Hit(
+                cap(r.get("title", ""), MAX_TITLE_CHARS),
+                cap(r.get("href", ""), MAX_URL_CHARS),
+                r.get("body", ""),
+            )
             for r in raw
         ]
         if hits:
@@ -90,8 +103,24 @@ async def research_findings(
     told to correct those from model knowledge and mark them [unverified].
     """
     picked = findings[:MAX_SEARCHES]
+
+    # Last checkpoint before text leaves this system. `search_query` is written by
+    # the judge after reading the error log, so anything in the log can in
+    # principle reach DuckDuckGo through it — a pasted credential exfiltrated as a
+    # search. The log is already redacted at ingress, which is the real fix; this
+    # re-scrubs because the cost of being wrong here is data leaving the building,
+    # and the two layers fail independently.
+    queries = []
+    for finding in picked:
+        clean, leaked = redact(cap(finding.search_query, MAX_QUERY_CHARS))
+        if leaked:
+            log.warning(
+                "redacted %s from an outbound search for %r", ",".join(leaked), finding.item
+            )
+        queries.append(clean)
+
     results = await asyncio.gather(
-        *(web_search(gemini, f.search_query) for f in picked), return_exceptions=True
+        *(web_search(gemini, query) for query in queries), return_exceptions=True
     )
 
     groups: list[Research] = []

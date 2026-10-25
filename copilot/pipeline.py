@@ -7,6 +7,7 @@ runbook, or patched against the web. That visibility is the product.
 import asyncio
 import json
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from datetime import date
 
@@ -24,6 +25,7 @@ from .embeddings import QUERY, embed_async
 from .judge import judge_runbook
 from .models import JudgeVerdict
 from .research import research_findings
+from .sanitize import clean_log
 from .sparse import encode_query
 from .synthesis import synthesize_stream
 
@@ -143,6 +145,22 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
     try:
         gemini = gemini_client()
 
+        # Redact BEFORE anything downstream sees the log. This is the one place it
+        # can be done once and cover every consumer: the embedding API, the judge,
+        # synthesis, and — the reason it matters — the outbound web search, whose
+        # query the judge writes after reading this text. A credential pasted in a
+        # log would otherwise leave the system as a DuckDuckGo query. The judge
+        # cannot emit a secret it was never shown.
+        error_log, redacted = clean_log(error_log)
+
+        # Per-request and unpredictable, so pasted content cannot close its own
+        # fence and continue in a section the model reads as trusted.
+        nonce = secrets.token_hex(4)
+
+        if redacted:
+            log.warning("redacted %s from the error log", ",".join(redacted))
+            yield sse("stage", {"stage": "redacted", "kinds": redacted})
+
         yield sse("stage", {"stage": "retrieving"})
         if not await qdrant.collection_exists(COLLECTION):
             yield sse(
@@ -202,7 +220,7 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
         else:
             yield sse("stage", {"stage": "judging"})
             verdict = await judge_runbook(
-                gemini, error_log, chunk, source, date.today().isoformat()
+                gemini, error_log, chunk, source, date.today().isoformat(), nonce
             )
             yield sse("verdict", verdict.model_dump())
 
@@ -243,7 +261,7 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
         yield sse("stage", {"stage": "synthesizing", "path": path})
 
         async for text in synthesize_stream(
-            gemini, error_log, chunk, source, research=research, weak=not covered
+            gemini, error_log, chunk, source, research=research, weak=not covered, nonce=nonce
         ):
             yield sse("token", {"text": text})
 

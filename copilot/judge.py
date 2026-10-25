@@ -7,21 +7,34 @@ from .clients import with_failover
 from .config import JUDGE_MODEL
 from .models import JudgeVerdict
 from .prompts import JUDGE_SYSTEM, JUDGE_USER
+from .sanitize import fence
 
 
 async def judge_runbook(
-    gemini: genai.Client, error_log: str, chunk: str, source: str, today: str
+    gemini: genai.Client,
+    error_log: str,
+    chunk: str,
+    source: str,
+    today: str,
+    nonce: str,
 ) -> JudgeVerdict:
     """Ask whether a retrieved runbook excerpt is still safe to follow.
 
     Returns a schema-validated verdict so the caller branches on a boolean
     rather than parsing prose.
+
+    The log is fenced with a per-request nonce. It used to sit under a bare
+    `ERROR LOG:` label whose only terminator was the next uppercase label, which
+    pasted text could write for itself — ending the untrusted section early and
+    continuing in one the model read as the runbook.
     """
 
     async def call(model: str):
         return await gemini.aio.models.generate_content(
             model=model,
-            contents=JUDGE_USER.format(error_log=error_log, source=source, chunk=chunk),
+            contents=JUDGE_USER.format(
+                error_log=fence("error_log", error_log, nonce), source=source, chunk=chunk
+            ),
             config=types.GenerateContentConfig(
                 system_instruction=JUDGE_SYSTEM.format(today=today),
                 response_mime_type="application/json",

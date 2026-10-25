@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from .sanitize import MAX_LOG_CHARS
+
 
 class StaleFinding(BaseModel):
     item: str = Field(description="The exact parameter, command, file, or version at fault")
@@ -37,4 +39,17 @@ class JudgeVerdict(BaseModel):
 
 
 class DiagnoseRequest(BaseModel):
-    error_log: str = Field(..., min_length=1, examples=["FATAL: sorry, too many clients already"])
+    """The one input this service does not control.
+
+    `max_length` is a contract, not a safeguard: an oversized paste gets a 422
+    naming the limit rather than being silently truncated into something the
+    engineer did not send. The pipeline caps again anyway, because the HTTP layer
+    is not the only possible caller.
+    """
+
+    error_log: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_LOG_CHARS,
+        examples=["FATAL: sorry, too many clients already"],
+    )
