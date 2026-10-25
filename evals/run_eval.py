@@ -29,6 +29,7 @@ import math
 import pathlib
 import sys
 from collections import defaultdict
+from datetime import date
 
 import numpy as np
 from qdrant_client import AsyncQdrantClient, models
@@ -38,6 +39,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from copilot.clients import gemini_client, qdrant_client
 from copilot.config import COLLECTION, MIN_MATCH_SCORE, SPARSE_VECTOR
 from copilot.embeddings import QUERY, embed_async
+from copilot.errors import UpstreamUnavailable
 from copilot.sparse import average_length, encode_document, encode_query
 
 log = logging.getLogger("evals")
@@ -341,8 +343,9 @@ def pct(value: float) -> str:
     return f"{value * 100:5.1f}"
 
 
-def report(rows: list[dict], threshold: float) -> dict:
+def report(rows: list[dict], threshold: float, rerank: bool = False) -> dict:
     summary = {"threshold": threshold, "arms": {}, "by_category": {}}
+    arms = (*ARMS, "rerank") if rerank else ARMS
 
     print(f"\n{len(rows)} queries  "
           f"({sum(1 for r in rows if r['relevant'])} on-topic, "
@@ -351,7 +354,7 @@ def report(rows: list[dict], threshold: float) -> dict:
     header = f"{'arm':<8}{'S@1':>7}{'S@3':>7}{'S@5':>7}{'R@5':>7}{'nDCG@5':>8}{'MRR':>7}"
     print(header)
     print("-" * len(header))
-    for arm in ARMS:
+    for arm in arms:
         m = score_rows(rows, arm)
         summary["arms"][arm] = m
         print(f"{arm:<8}{pct(m['success@1']):>7}{pct(m['success@3']):>7}"
@@ -360,7 +363,7 @@ def report(rows: list[dict], threshold: float) -> dict:
 
     print(f"\nscore floor at {threshold:.2f} (dense cosine of the chunk DBSF serves)")
     print(f"{'arm':<8}{'prec':>7}{'recall':>8}{'F1':>7}{'false refusals':>16}{'false accepts':>15}")
-    for arm in ARMS:
+    for arm in arms:
         g = gate_metrics(rows, arm, threshold)
         summary["arms"][arm]["gate"] = g
         print(f"{arm:<8}{pct(g['precision']):>7}{pct(g['recall']):>8}{pct(g['f1']):>7}"
@@ -470,7 +473,87 @@ def sweep(rows: list[dict]) -> None:
 # --------------------------------------------------------------------------
 
 
-async def measure(refresh: bool) -> list[dict]:
+async def add_rerank_arm(rows: list[dict], corpus: list[dict], limit: int, depth: int) -> None:
+    """Re-order DBSF's top `depth` with the shipped judge, as a fourth arm.
+
+    Not offline and deliberately not part of --check: it costs one judge call per
+    candidate. Verdicts are cached on (query, chunk), so the expense is the first
+    run only. Rows past `limit` carry the DBSF order unchanged so the arm is still
+    scoreable over the whole set.
+    """
+    from copilot.clients import gemini_client
+
+    from .rerank import judge_candidates, load_cache, reorder, save_cache
+
+    by_key = {c["key"]: c for c in corpus}
+    cache = load_cache()
+    gemini = gemini_client()
+
+    # Which rows are worth spending calls on. Taking the first N is the wrong
+    # sample: it buys mostly exact_log queries that DBSF already gets right, and
+    # answers neither half of the question. The two things that matter are whether
+    # reranking FIXES the misses and whether it BREAKS anything it already had, so
+    # order by that — misses first, then the narrowest wins, which are the ones a
+    # reorder is most likely to flip.
+    def informativeness(row: dict) -> tuple[int, int]:
+        ranked = row["results"]["dbsf"]["ranked"]
+        missed = bool(row["relevant"]) and not success_at(ranked, row["relevant"], 1)
+        return (0 if missed else 1, 0 if not row["relevant"] else 1)
+
+    # Iterate in informativeness order, not file order. Selecting the most
+    # informative rows but then walking the file meant a run that stopped early
+    # covered an arbitrary slice of the selection rather than the useful end of
+    # it — and since provider capacity decides where a run stops, that is the
+    # normal case, not the unlucky one.
+    ordered = sorted(rows, key=informativeness)
+    chosen = {r["id"] for r in ordered[:limit]}
+
+    done = 0
+    exhausted = False
+    try:
+        for row in ordered:
+            ranked = row["results"]["dbsf"]["ranked"][:depth]
+            if exhausted or row["id"] not in chosen or not ranked:
+                row["results"]["rerank"] = dict(row["results"]["dbsf"])
+                continue
+            try:
+                accepted = await judge_candidates(
+                    gemini, row["query"], [by_key[k] for k in ranked], cache,
+                    date.today().isoformat(),
+                )
+            except UpstreamUnavailable as exc:
+                # Gemini ran out of capacity on every failover model. Stop reranking
+                # and report what was measured, rather than losing the whole run —
+                # the cache already holds the verdicts that were paid for, so a
+                # re-run resumes rather than restarts.
+                #
+                # This is not an edge case here. The README measures 503 on roughly
+                # one call in three, and a reranker multiplies judge calls by
+                # `depth`, so it multiplies exposure to exactly this.
+                log.warning("rerank stopped after %d rows: %s", done, exc)
+                row["results"]["rerank"] = dict(row["results"]["dbsf"])
+                exhausted = True
+                continue
+            order = reorder(ranked, accepted)
+            tail = row["results"]["dbsf"]["ranked"][depth:]
+            row["results"]["rerank"] = {
+                "ranked": order + tail,
+                "top": order[0],
+                # The floor still reads the cosine of whatever is now served.
+                "gate_score": row["results"]["dbsf"]["gate_score"],
+                "accepted": sum(accepted),
+            }
+            done += 1
+            if done % 5 == 0:
+                save_cache(cache)
+                log.info("reranked %d/%d", done, min(limit, len(rows)))
+    finally:
+        save_cache(cache)
+        log.info("reranked %d of %d rows (rest carry the DBSF order unchanged)", done, len(rows))
+    return done
+
+
+async def measure(refresh: bool) -> tuple[list[dict], list[dict]]:
     golden = [json.loads(line) for line in GOLDEN_SET.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     if refresh or not CORPUS_CACHE.exists():
@@ -495,6 +578,7 @@ async def measure(refresh: bool) -> list[dict]:
             rows.append(
                 {
                     "id": item["id"],
+                    "query": item["query"],
                     "category": item["category"],
                     "relevant": {
                         f"{e['source']}#{e['chunk_index']}" for e in item["expected"]
@@ -502,7 +586,7 @@ async def measure(refresh: bool) -> list[dict]:
                     "results": results,
                 }
             )
-        return rows
+        return rows, corpus
     finally:
         await client.close()
 
@@ -518,11 +602,19 @@ def main() -> int:
     parser.add_argument("--write-baseline", action="store_true")
     parser.add_argument("--tolerance", type=float, default=0.02,
                         help="allowed drop before --check fails (default 0.02)")
+    parser.add_argument("--rerank", action="store_true",
+                        help="add a judge-reranked arm (COSTS API CALLS; not in --check)")
+    parser.add_argument("--rerank-limit", type=int, default=1000,
+                        help="rerank at most N queries, to bound a first run")
+    parser.add_argument("--rerank-depth", type=int, default=3,
+                        help="how many DBSF candidates to show the judge (default 3)")
     parser.add_argument("--json", dest="json_path")
     args = parser.parse_args()
 
-    rows = asyncio.run(measure(args.refresh))
-    summary = report(rows, MIN_MATCH_SCORE)
+    rows, corpus = asyncio.run(measure(args.refresh))
+    if args.rerank:
+        asyncio.run(add_rerank_arm(rows, corpus, args.rerank_limit, args.rerank_depth))
+    summary = report(rows, MIN_MATCH_SCORE, rerank=args.rerank)
 
     if args.sweep:
         sweep(rows)

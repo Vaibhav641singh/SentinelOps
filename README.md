@@ -279,6 +279,27 @@ Per-category Success@1 under DBSF:
 
 Truncated fragments are the weakest, which is what you would expect — `Exit Code: 137` is two tokens and shares them with every other container failure.
 
+### Reranking: built, not yet measured
+
+All four remaining DBSF top-1 misses are near-neighbour confusions — `Exit Code: 137` landing on crashloopbackoff rather than oomkilled — which is the case a cross-encoder is supposed to fix. `python -m evals.run_eval --rerank` adds that as a fourth arm.
+
+The reranker is `judge_runbook` unchanged. It already reads `(log, chunk)` and returns `covers_incident`, which *is* a cross-encoder relevance decision; it only ever sees one chunk. Showing it the top 3 and stably partitioning on what it accepts costs no new dependency, no new API key and no new prompt — and because it is the shipped judge, what gets measured is what would actually run. A local cross-encoder (bge-reranker, ms-marco-MiniLM) is the conventional answer and is ruled out by the constraint that ruled out `fastembed`: it needs torch.
+
+**No result is reported here, because the measurement has not completed.** Three attempts reranked 1 of 87 rows between them. Gemini returned `503 UNAVAILABLE` on every configured failover model, sustained across roughly 45 minutes. The arm prints a number — with one row reranked it reads 95.9 against DBSF's 94.5 — and that number means nothing: 86 of 87 rows are DBSF passthrough and the delta is a single query. It is left out of the table rather than quoted with an asterisk.
+
+Two things are already clear and neither depends on finishing the run:
+
+- **Latency.** A 10-query trial at depth 3 took 11 minutes, about 66s per query. The judge has thinking enabled and [must keep it](#risks--honest-limitations) — disabling it dropped replacement accuracy from 9/10 to 8/13. For a service whose premise is streaming recovery steps to an on-call engineer, three judge calls before the first token is the wrong shape.
+- **Capacity exposure is structural.** The README measures 503 on roughly one call in three. Reranking at depth 3 triples judge calls, so it triples exposure to exactly that — which is why this measurement is the thing that failed, not an unlucky one.
+
+So the open question is not "does reranking help" but "does it help enough to justify 66s and triple the 503 surface" — and the honest answer today is that the first half is unmeasured. Verdicts are cached on `(query, chunk)`, so a re-run resumes rather than restarts:
+
+```bash
+python -m evals.run_eval --rerank --rerank-limit 26
+```
+
+Rows are reranked in order of how much they can teach — the misses first, then the on-topic wins most likely to be broken by a reorder — so a run that stops early still covers the useful end of the set. The row count is printed next to the arm, so a partial arm cannot be read as a full one. It is excluded from `--check` and from `baseline.json`: it is not offline and must never gate CI.
+
 **What this does not measure.** The harness evaluates retrieval and the score floor. It cannot evaluate `covers_incident`, which needs a live judge call, so the gate numbers above are the floor alone. Given the floor currently refuses nothing, the system's real refusal behaviour is entirely unmeasured here — faithfulness and judge accuracy are the next thing to score.
 
 ## Risks & honest limitations
