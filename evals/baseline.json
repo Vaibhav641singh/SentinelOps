@@ -1,5 +1,5 @@
 {
-  "threshold": 0.52,
+  "threshold": 0.62,
   "arms": {
     "dense": {
       "success@1": 0.9178082191780822,
@@ -10,11 +10,11 @@
       "mrr": 0.9502283105022831,
       "n": 73,
       "gate": {
-        "precision": 0.8390804597701149,
-        "recall": 1.0,
-        "f1": 0.9125,
-        "false_refusals": 0,
-        "false_accepts": 14
+        "precision": 0.9102564102564102,
+        "recall": 0.9726027397260274,
+        "f1": 0.9403973509933774,
+        "false_refusals": 2,
+        "false_accepts": 7
       }
     },
     "bm25": {
@@ -26,11 +26,11 @@
       "mrr": 0.95662100456621,
       "n": 73,
       "gate": {
-        "precision": 0.8488372093023255,
-        "recall": 1.0,
-        "f1": 0.9182389937106918,
-        "false_refusals": 0,
-        "false_accepts": 13
+        "precision": 0.9726027397260274,
+        "recall": 0.9726027397260274,
+        "f1": 0.9726027397260274,
+        "false_refusals": 2,
+        "false_accepts": 2
       }
     },
     "dbsf": {
@@ -42,11 +42,11 @@
       "mrr": 0.9726027397260274,
       "n": 73,
       "gate": {
-        "precision": 0.8390804597701149,
-        "recall": 1.0,
-        "f1": 0.9125,
-        "false_refusals": 0,
-        "false_accepts": 14
+        "precision": 0.9466666666666667,
+        "recall": 0.9726027397260274,
+        "f1": 0.9594594594594594,
+        "false_refusals": 2,
+        "false_accepts": 4
       }
     }
   },
@@ -71,7 +71,7 @@
     },
     "off_topic_negative": {
       "n": 12,
-      "refused": 0,
+      "refused": 8,
       "negatives": true
     },
     "paraphrase": {
@@ -115,5 +115,9 @@
   "on_topic_max": 0.7885666442236776,
   "off_topic_min": 0.5637779597406827,
   "off_topic_max": 0.6562250606960167,
-  "gap": -0.11446141398803245
+  "gap": -0.11446141398803245,
+  "false_refusal_ids": [
+    "trunc-idle-01",
+    "short-dg-md5-01"
+  ]
 }

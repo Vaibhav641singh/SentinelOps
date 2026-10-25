@@ -54,22 +54,51 @@ def test_uncovered_incident_is_no_match_however_current_the_runbook():
     assert choose_path(covered=False, current=True) == PATH_NO_MATCH
 
 
-def test_score_floor_is_below_every_observed_on_topic_score():
-    # The floor must sit UNDER the on-topic minimum, or it refuses queries the
-    # runbook covers — and a floor refusal is final, because it skips the judge
-    # that would have overturned it.
-    #
-    # The bound is READ from the eval baseline rather than pasted in. It used to be
-    # a hand-copied 0.5418, which is the one number in the suite that could silently
-    # stop describing reality: nothing recomputed it, and the corpus has since grown
+# How many covered queries the floor is allowed to refuse outright. Not zero:
+# at a floor low enough to refuse nothing, the floor also CATCHES nothing — all
+# 14 negatives cleared 0.52 and each one cost a judge call. 0.62 buys 8 of 12
+# off-topic refusals for exactly 2 covered ones, which was judged worth it.
+#
+# This is a budget, not a target. A refusal here is final: it skips the judge, so
+# nothing downstream can overturn it and the engineer is told the library does
+# not cover an incident it does. Raising the floor spends from this budget, and
+# the build fails rather than letting that happen quietly.
+MAX_FALSE_REFUSALS = 2
+
+
+def test_the_floor_refuses_no_more_covered_queries_than_budgeted():
+    # Read from the eval baseline rather than pasted in. This used to be a
+    # hand-copied 0.5418 — the one number in the suite that could silently stop
+    # describing reality, since nothing recomputed it and the corpus has grown
     # from one runbook to eleven. Regenerate with:
     #
     #     python -m evals.run_eval --write-baseline
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-    on_topic_min = baseline["on_topic_min"]
-    assert MIN_MATCH_SCORE < on_topic_min, (
-        f"floor {MIN_MATCH_SCORE} would refuse an on-topic query scoring "
-        f"{on_topic_min:.4f}, which no judge call can rescue"
+    assert baseline["threshold"] == MIN_MATCH_SCORE, (
+        f"baseline was measured at {baseline['threshold']} but the configured floor "
+        f"is {MIN_MATCH_SCORE} — re-run: python -m evals.run_eval --write-baseline"
+    )
+    refused = baseline["arms"]["dbsf"]["gate"]["false_refusals"]
+    assert refused <= MAX_FALSE_REFUSALS, (
+        f"floor {MIN_MATCH_SCORE} refuses {refused} covered queries "
+        f"({', '.join(baseline['false_refusal_ids'])}); budget is {MAX_FALSE_REFUSALS}. "
+        "Each is final — the judge never sees them."
+    )
+
+
+def test_the_floor_still_earns_its_place():
+    # The mirror of the budget test. A floor that refuses nothing is not a
+    # conservative floor, it is an absent one, and every off-topic log then costs
+    # a judge call. If this ever fails, the floor has drifted back down to
+    # decoration and should either be raised or removed honestly.
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    accepts = baseline["arms"]["dbsf"]["gate"]["false_accepts"]
+    negatives = sum(
+        c["n"] for c in baseline["by_category"].values() if c.get("negatives")
+    )
+    assert accepts < negatives, (
+        f"the floor lets through all {negatives} off-topic queries — it is filtering "
+        "nothing, and coverage rests entirely on the judge"
     )
 
 

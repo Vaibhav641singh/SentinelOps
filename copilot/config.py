@@ -40,36 +40,38 @@ FALLBACK_MODELS = [
     if m.strip()
 ]
 
-# A conservative floor, not a relevance classifier. Below this the chunk is obvious
-# garbage and not worth a judge call; everything above it goes to the judge, which
-# decides coverage via JudgeVerdict.covers_incident.
+# The relevance floor, below which the judge is not called at all.
 #
-# This used to be 0.62 and was asked to decide relevance on its own. It cannot.
-# Measured over 16 queries (scripts/measure_hybrid.py), the two populations overlap:
+# Measured over the 87-query golden set (python -m evals.run_eval --sweep). The
+# two populations overlap by 0.1145, so NO threshold separates them:
 #
-#   on-topic  dense top1: 0.5602 .. 0.7706
-#   off-topic dense top1: 0.5621 .. 0.6648   <- overlaps by 0.1046
+#   on-topic  selected-chunk cosine: 0.5418 .. 0.7886
+#   off-topic selected-chunk cosine: 0.5638 .. 0.6562
 #
-# No threshold separates them. The best any single value achieves is 14/16, which
-# 0.62 already hit, so tuning the number was exhausted. The two failures are
-# semantic: pg_crash.log scores 0.6648 because it is *about Postgres*, not because
-# the disk-full section fixes it, while a short on-topic query scored 0.5602 purely
-# because short queries sit lower against long chunks. Cosine measures topic, not
-# coverage, so coverage moved to the judge and this dropped to a floor that only
-# catches the genuinely unrelated.
+# Every value is therefore a trade, not a solution. 0.62 is peak F1 (95.9) and is
+# chosen deliberately:
 #
-# Re-derived at 0.52 once the score started describing the chunk actually served
-# rather than whatever dense retrieval ranked first (see pipeline.retrieve). Those
-# are different points under fusion, and the chunk-level scores run lower:
+#   0.52 -> 0 false refusals, 14 false accepts   (the floor filters NOTHING;
+#                                                 every negative reaches a judge call)
+#   0.62 -> 2 false refusals,  4 false accepts   F1 95.9
+#   0.66 -> 8 false refusals,  0 false accepts
 #
-#   on-topic  selected-chunk cosine: 0.5418 .. 0.7706
-#   off-topic selected-chunk cosine: 0.4981 .. 0.6644
+# The cost is real and named. At 0.62 two covered queries are refused without a
+# judge call, and a floor refusal is final because it skips the judge that would
+# have overturned it:
 #
-# 0.55 would now refuse `password_encryption md5 no longer accepted` at 0.5418,
-# which SECTION 1 covers on line 60. The floor must stay BELOW the lowest on-topic
-# score — it is a garbage filter, and every false refusal it causes is one the judge
-# never gets the chance to overturn.
-MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.52"))
+#   `oldest xmin`                             0.6181
+#   `password_encryption md5 no longer accepted` 0.5418  <- SECTION 1 covers this
+#
+# That second one is a genuine capability loss: it is one of the three staleness
+# cases the judge reliably catches, and at this floor it never gets the chance.
+# Accepted because the alternative was a floor that refused nothing at all, and
+# 8 of 12 off-topic queries now stop here instead of each costing a judge call.
+#
+# tests/test_pipeline.py holds the refusal count to a budget and reads it from
+# evals/baseline.json, so raising this further fails the build rather than
+# quietly trading away more coverage.
+MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
 
 # Each finding costs a web search. The judge orders findings by severity, so the
 # tail is the cheapest thing to drop.

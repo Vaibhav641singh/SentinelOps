@@ -211,14 +211,14 @@ All of `.env`. Model IDs live here deliberately — Gemini model strings change 
 | `JUDGE_MODEL` | `gemini-3.1-flash-lite` | cheap; thinking disabled |
 | `SYNTH_MODEL` | `gemini-3.8-flash` | |
 | `FALLBACK_MODELS` | `gemini-3.7-flash,gemini-3.1-flash-lite` | tried in order on 503/429 |
-| `MIN_MATCH_SCORE` | `0.52` | floor only; the judge decides coverage — see below |
+| `MIN_MATCH_SCORE` | `0.62` | peak F1; costs 2 refusals, catches 8 of 12 — see below |
 | `HYBRID_SEARCH` | `true` | dense + BM25 fused; re-ingest after changing |
 
 ### The relevance gate
 
 Retrieval always returns *something*, even for a log no runbook covers. Without a floor, the pipeline would audit whatever came back and burn web searches on staleness irrelevant to the incident — an nginx SSL error retrieved the Postgres runbook and triggered searches for `wal_keep_segments`, then labelled the answer `web_patched` as though it had corrected something useful.
 
-**This used to be one cosine threshold, and that was wrong.** `MIN_MATCH_SCORE` was 0.62, asked to decide relevance by itself. Measured now over 87 queries with `python -m evals.run_eval`, the two populations overlap by **0.1145**:
+**This used to be one cosine threshold asked to decide relevance by itself, and that was wrong.** Measured now over 87 queries with `python -m evals.run_eval`, the two populations overlap by **0.1145**:
 
 | | dense cosine of the served chunk |
 |---|---|
@@ -227,28 +227,30 @@ Retrieval always returns *something*, even for a log no runbook covers. Without 
 
 No threshold separates them, and the gap is *wider* on the eleven-document corpus than it was on one. Cosine measures topic, not coverage. So coverage moved to the judge, which reads both the log and the excerpt and returns `covers_incident` alongside `current` — no extra API call, just one more field on a verdict already being requested.
 
-**At 0.52 the floor filters nothing.** This is the uncomfortable result and it is worth stating plainly: all 14 negatives clear it, including `x509: certificate signed by unknown authority` at 0.5655 and a MySQL deadlock at 0.6460. The floor produces zero false refusals and zero correct refusals. Every coverage decision in the system is the judge's.
-
 The sweep, from `--sweep`:
 
 | floor | precision | recall | F1 | false refusals | false accepts |
 |---|---|---|---|---|---|
-| 0.52 *(configured)* | 83.9 | 100.0 | 91.2 | 0 | 14 |
+| 0.52 *(previous)* | 83.9 | 100.0 | 91.2 | 0 | 14 |
 | 0.55 | 83.7 | 98.6 | 90.6 | 1 | 14 |
 | 0.60 | 88.9 | 98.6 | 93.5 | 1 | 9 |
-| **0.62** | 94.7 | 97.3 | **95.9** | 2 | 4 |
+| **0.62** *(configured)* | 94.7 | 97.3 | **95.9** | 2 | 4 |
 | 0.66 | 100.0 | 89.0 | 94.2 | 8 | 0 |
 
-**Peak F1 is at 0.62 — the value that was abandoned.** 0.52 is kept anyway, and the reason is that F1 weights the two errors equally when they are not:
+**0.52 was abandoned because it filtered nothing.** All 14 negatives cleared it — `x509: certificate signed by unknown authority` at 0.5655, a MySQL deadlock at 0.6460 — so it produced zero false refusals *and zero correct ones*. It was not a conservative floor, it was an absent one, and every off-topic log cost a judge call.
 
-- A **false refusal** is final. It skips the judge, so nothing downstream can overturn it, and the engineer is told the library does not cover an incident it does cover.
-- A **false accept** is survivable. It costs one judge call, and `covers_incident` is the thing actually designed to catch it.
+0.62 is peak F1 and refuses 8 of the 12 off-topic queries. **The two it costs are named, because a floor refusal is final** — it skips the judge, so nothing downstream can overturn it:
 
-So the floor is set below the lowest observed on-topic score (0.5418, the query `password_encryption md5 no longer accepted`, which SECTION 1 covers) and does nothing else. It is a guard against a genuinely empty match, not a relevance classifier — and on this corpus it never fires.
+| refused query | score | covered by |
+|---|---|---|
+| `oldest xmin` | 0.6181 | postgres-idle-in-transaction |
+| `password_encryption md5 no longer accepted` | 0.5418 | database_guide SECTION 1 |
 
-**The honest cost:** this puts 100% of coverage on a model the [risks section](#risks--honest-limitations) calls the shakiest link, and it means every off-topic log pays for a judge call. If judge cost or latency becomes the constraint, 0.62 buys back 10 of 14 false accepts for 2 false refusals — but that trade should be made deliberately and measured, not drifted into.
+The second is a genuine capability loss and worth stating plainly: `password_encryption = md5` is one of the three staleness cases the judge reliably catches, and at this floor the query never reaches it. Both demo samples still pass, so the `runbook` and `web_patched` paths are unaffected.
 
-`tests/test_pipeline.py` asserts the floor stays below the on-topic minimum, reading that bound from `evals/baseline.json` rather than a pasted constant. A second test asserts the populations still overlap — if a clean separating threshold ever appears, the judge-based gate is worth re-examining rather than kept because a comment says so.
+The four negatives that still get through are the deliberately hard ones — a Kubernetes DNS error, a MongoDB election failure, a MySQL deadlock, and a systemd message sharing the literal string `No space left on device` with SECTION 2. Those are the judge's job, which is what `covers_incident` exists for.
+
+`tests/test_pipeline.py` holds the refusal count to a budget of 2, read from `evals/baseline.json`, and fails the build if the floor is raised further — naming the queries it would cost. A second test asserts the floor still catches *something*, so it cannot drift back to decoration. A third asserts the populations still overlap: if a clean separating threshold ever appears, the judge-based gate is worth re-examining rather than keeping because a comment says so. Changing the floor without regenerating the baseline also fails, so the numbers here cannot go stale silently.
 
 ### Reproducing these numbers
 
@@ -296,7 +298,7 @@ The fix was an explicit test — *"would this line actually break on a supported
 
 **Tuning the threshold is the work.** If you change the runbook, re-check both directions: that a stale section trips, *and* that a current one doesn't. Run `python -m evals.run_eval` rather than eyeballing one log — a single threshold looked fine for months against four sample logs, held up against sixteen queries, and then turned out to refuse nothing at all when it was measured against eighty-seven.
 
-**Coverage now rests on the judge, which moves a known-imperfect model onto the refusal path.** The relevance floor is deliberately too low to catch a topical near-miss, so if the judge wrongly returns `covers_incident: true` the engineer gets advice for the wrong incident, and if it wrongly returns false they get a refusal for an incident the library does cover. The prompt leans against the second — a false refusal throws away a usable answer — which means the first is the likelier failure. Synthesis is the remaining backstop: it is told to say plainly when the excerpt does not cover the error rather than invent commands.
+**Coverage is split between a floor that is measurably imperfect and a model that is measurably imperfect.** The floor at 0.62 catches 8 of 12 off-topic queries and costs 2 covered ones outright, with no judge call to overturn them — those two are named in [the relevance gate](#the-relevance-gate) rather than buried. What survives the floor goes to the judge, so if it wrongly returns `covers_incident: true` the engineer gets advice for the wrong incident, and if it wrongly returns false they get a refusal for an incident the library does cover. The prompt leans against the second, which makes the first the likelier failure. The four negatives that still clear the floor are near-misses by construction — a MongoDB election failure, a systemd message sharing `No space left on device` with SECTION 2 — so the judge is being asked the hard version of the question, not the easy one. Synthesis is the remaining backstop: it is told to say plainly when the excerpt does not cover the error rather than invent commands.
 
 **Never auto-execute the output.** A human reads and runs the commands. An AI that pulls a "fix" off the open web and runs it against a production database is how you delete a company. This is a copilot that advises, not an autopilot that acts.
 

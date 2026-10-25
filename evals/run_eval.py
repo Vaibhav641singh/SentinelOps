@@ -416,6 +416,21 @@ def report(rows: list[dict], threshold: float) -> dict:
             got = row["results"]["dbsf"]["top"]
             print(f"  {row['id']:<26} wanted {'|'.join(sorted(row['relevant'])):<46} got {got}")
 
+    # The cost side of the floor, listed by name. A false refusal skips the judge,
+    # so nothing downstream can overturn it — these are queries the library covers
+    # and the engineer is told it does not. If the floor is ever raised, this is
+    # the list to read before agreeing to it.
+    refusals = [
+        r for r in rows
+        if r["relevant"] and r["results"]["dbsf"]["gate_score"] < threshold
+    ]
+    if refusals:
+        print(f"\n{len(refusals)} on-topic queries refused by the floor (no judge call):")
+        for row in refusals:
+            print(f"  {row['id']:<26} {row['results']['dbsf']['gate_score']:.4f} "
+                  f"-> {'|'.join(sorted(row['relevant']))}")
+    summary["false_refusal_ids"] = [r["id"] for r in refusals]
+
     leaks = [
         r for r in rows
         if not r["relevant"] and r["results"]["dbsf"]["gate_score"] >= threshold
