@@ -193,12 +193,14 @@ the model receives the forged label *inside* the fence, scoped as data, while th
 | `stage` | `{"stage":"retrieving"\|"retrieved"\|"skipped_judge"\|"judging"\|"not_covered"\|"web_search"\|"web_results"\|"synthesizing", …}` |
 | `verdict` | `{"covers_incident":bool,"current":bool,"reason":str,"findings":[{"item","problem","search_query"}]}` |
 | `token` | `{"text":"…"}` — incremental synthesis output |
-| `done` | `{"path":"runbook"\|"web_patched"\|"no_match","findings":[…],"sources":[…]}` |
+| `done` | `{"path":"runbook"\|"web_patched"\|"no_match","findings":[…],"sources":[…],"unlinked":int}` |
 | `error` | `{"message":"…"}` |
 
 The judge returns a **list** of findings, not one reason. A single-reason schema let it stop at the first problem it noticed, and these docs usually rot in several places at once. Each finding gets its own targeted web search, run concurrently, capped at `MAX_SEARCHES` (3) — findings past the cap still reach the merge step but are corrected from model knowledge and tagged `[unverified]` in the output.
 
 The `path` field is the point of the whole project: it tells you whether the answer came straight from the runbook or was corrected against the web.
+
+**`sources` is not a citation list, and is not labelled as one.** It is every distinct URL the search backend returned for the findings that were researched — gathered *before* synthesis runs and never compared against what the model wrote. Calling it "sources consulted" would tell an engineer at 3am that a command was backed by a link when nothing checked that. Both clients now say "search results given to the model", and `unlinked` reports results whose text reached the prompt but carry no URL to show (the grounding fallback returns its whole summary that way), so the list is not read as the whole of what the answer drew on. Per-step attribution is the merge prompt's inline `[runbook]` / `[web]` / `[runbook, corrected from web]` tags.
 
 ## Configuration
 

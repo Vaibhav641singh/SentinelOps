@@ -407,7 +407,14 @@ async function diagnose() {
       if (data.sources?.length) {
         const ul = document.createElement("ul");
         ul.className = "sources";
-        ul.innerHTML = "<li style='color:var(--muted);padding-top:8px'>Web sources consulted</li>" +
+        // NOT a citation list. These are the search results handed to the model
+        // before it wrote anything; nothing checks which it actually used. Per-step
+        // origin is tagged inline in the answer as [runbook] / [web] / [unverified].
+        const extra = data.unlinked
+          ? ` &middot; ${data.unlinked} further result${data.unlinked > 1 ? "s" : ""} had no link`
+          : "";
+        ul.innerHTML = "<li style='color:var(--muted);padding-top:8px'>Search results given to the model" +
+          extra + " &mdash; each step is tagged with its own origin</li>" +
           data.sources.map(u => `<li><a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a></li>`).join("");
         $("sourcesBox").appendChild(ul);
       }

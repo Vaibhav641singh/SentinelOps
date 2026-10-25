@@ -24,7 +24,7 @@ from .config import (
 from .embeddings import QUERY, embed_async
 from .judge import judge_runbook
 from .models import JudgeVerdict
-from .research import research_findings
+from .research import research_findings, unlinked_hits
 from .sanitize import clean_log
 from .sparse import encode_query
 from .synthesis import synthesize_stream
@@ -278,7 +278,16 @@ async def diagnose_events(error_log: str) -> AsyncIterator[str]:
                 # wants it. Unsearched findings past MAX_SEARCHES are included,
                 # because those do reach synthesis and are marked [unverified] there.
                 "findings": [group.finding.item for group in research] if research else [],
+                # These are the results that were PUT IN FRONT of the model, gathered
+                # before synthesis ran and never compared against what it wrote. They
+                # are not a citation list, and calling them one would tell an engineer
+                # at 3am that a command was backed by a link when nothing checked that.
+                # Per-step origin is marked inline by the merge prompt as [runbook],
+                # [web] or [unverified]. `unlinked` counts results whose text reached
+                # the prompt but carry no URL to show, so the list is not read as the
+                # whole of what the answer drew on.
                 "sources": sources,
+                "unlinked": unlinked_hits(research) if research else 0,
             },
         )
 

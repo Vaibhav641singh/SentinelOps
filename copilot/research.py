@@ -143,6 +143,17 @@ async def research_findings(
     return groups, sources
 
 
+def unlinked_hits(groups: list[Research]) -> int:
+    """Hits whose text reached the prompt but which carry no URL to show.
+
+    The grounding fallback returns one hit holding the model's whole summary with
+    an empty url (research.py, web_search). That text is in the prompt and shaped
+    the answer, but it is filtered out of `sources` by the `if hit.url` check — so
+    reporting only `sources` understates what the answer was built from.
+    """
+    return sum(1 for g in groups for h in g.hits if not h.url)
+
+
 def format_research(groups: list[Research]) -> str:
     """Render research as the numbered block the merge prompt expects."""
     blocks = []

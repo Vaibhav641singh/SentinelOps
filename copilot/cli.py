@@ -126,6 +126,7 @@ def diagnose(
     answer = ""
     path = None
     sources: list[str] = []
+    unlinked = 0
     streaming = False
 
     try:
@@ -168,6 +169,7 @@ def diagnose(
             elif name == "done":
                 path = data.get("path")
                 sources = data.get("sources", [])
+                unlinked = data.get("unlinked", 0)
 
             elif name == "error":
                 console.print(f"\n[bold red]Backend error:[/bold red] {data['message']}")
@@ -182,9 +184,14 @@ def diagnose(
         console.print(Markdown(answer))
 
     if sources:
-        console.print("\n[dim]Web sources consulted:[/dim]")
+        # Not citations. These were handed to the model before it wrote anything,
+        # and nothing verifies which it actually used. The answer tags each step's
+        # own origin inline as [runbook] / [web] / [runbook, corrected from web].
+        console.print("\n[dim]Search results given to the model:[/dim]")
         for src in sources:
             console.print(f"  [dim]- {src}[/dim]")
+        if unlinked:
+            console.print(f"  [dim]({unlinked} further result(s) carried no link)[/dim]")
 
     if path:
         label = {
