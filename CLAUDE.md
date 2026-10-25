@@ -1,8 +1,39 @@
-# SentinelOps — working notes
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 On-call assistant: reads an error log, retrieves the matching runbook, **asks a second model whether that runbook is still true**, patches it against the web when it isn't, and streams recovery commands for a human to run. It suggests; it never executes.
 
-`README.md` carries the full rationale and every measured number. This file holds what is easy to get wrong or accidentally undo. When the two disagree, the README is the source of truth for *why*; this file is the source of truth for *how to run it*.
+`README.md` carries the full rationale and every measured number. This file holds the shape of the system and what is easy to get wrong or accidentally undo. When the two disagree, the README is the source of truth for *why*; this file is the source of truth for *how to run it*.
+
+## Architecture
+
+**Two entry points, and data flows one way.** `copilot/ingest.py` is the only thing that ever *writes* to Qdrant; the service only reads. This is deliberate — if the app embedded documents at startup, every restart and autoscale event would re-embed the corpus and burn API quota. Changing a runbook means re-running ingest by hand.
+
+**One request, in `pipeline.diagnose_events`,** emitted as SSE so the caller can watch which path ran — that visibility is the product:
+
+```
+error log
+  → clean_log()          redact + cap, ONCE, before anything downstream sees it
+  → embed + BM25         dense (Gemini) + sparse (local, copilot/sparse.py)
+  → retrieve()           DBSF fusion picks the chunk; dense cosine scores it
+  → floor                below MIN_MATCH_SCORE the judge is skipped entirely
+  → judge_runbook()      one call, TWO decisions: covers_incident AND current
+  → research_findings()  one web search per stale finding, concurrent, capped
+  → synthesize_stream()  streamed; path = runbook | web_patched | no_match
+```
+
+Four non-obvious things, each of which spans several files:
+
+**`retrieve()` answers two different questions with two different signals.** *Which* chunk is a ranking question, and DBSF fusion answers it better than either arm alone. *Whether anything matched at all* is an absolute question, and a fused score cannot answer it — fusion scores are rank-derived, so the top hit scores high by construction (measured: RRF returned exactly `1.0` for queries nothing covered). So the floor reads raw dense cosine **of the chunk fusion actually served**, which is frequently not dense's own top hit. `dense_score_of` exists for the case where BM25 surfaces something dense ranked below `PREFETCH_DEPTH`.
+
+**Coverage is the judge's decision, not the threshold's.** `JudgeVerdict` returns `covers_incident` alongside `current` in a single schema-constrained call, so it costs nothing extra. This is because cosine measures *topic*, not coverage — a Postgres crash log scores high against a disk-full section because both are Postgres. The floor is only a coarse pre-filter.
+
+**Prompt assembly has three variants**, chosen in `synthesis.build_prompt`: merge (runbook + web research), plain, and plain + weak-match note. Prompts live in `prompts/*.md` as content, not Python literals. `MERGE_SYSTEM` is `SYNTH_SYSTEM` plus the merge rules, so formatting rules are written once.
+
+**Untrusted input is handled at the boundary.** `clean_log()` runs once at the top of the pipeline, which is the only place that covers all four consumers — embedding, BM25, judge, and the outbound web search whose query the judge writes. A per-request `nonce` threads from `pipeline` into `judge_runbook` and `build_prompt` so untrusted content is fenced with markers it cannot forge.
+
+**Layering:** `errors.py` exists so nothing below `api.py` imports FastAPI. `api.py` is the only module that knows status codes.
 
 ## Commands
 
@@ -10,6 +41,8 @@ The venv is Python 3.12 and is **not** always on PATH — call it explicitly:
 
 ```bash
 venv/Scripts/python.exe -m pytest -q                  # 80 tests, no network needed
+venv/Scripts/python.exe -m pytest tests/test_sanitize.py -q              # one file
+venv/Scripts/python.exe -m pytest tests/test_sanitize.py::test_password_encryption_setting_survives -q
 venv/Scripts/python.exe -m ruff check copilot/ tests/ evals/ scripts/
 venv/Scripts/python.exe -m evals.run_eval             # retrieval eval, fully offline
 venv/Scripts/python.exe -m evals.run_eval --sweep     # threshold sweep
