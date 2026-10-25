@@ -330,6 +330,7 @@ copilot/
 ├─ pipeline.py      the diagnosis flow, emitted as SSE
 ├─ api.py           FastAPI routes — the only module that knows status codes
 ├─ security.py      shared-key auth
+├─ sanitize.py      redaction, bounding and fencing for the untrusted log
 ├─ ingest.py        standalone: WRITES runbooks into Qdrant
 └─ cli.py           terminal client
 
