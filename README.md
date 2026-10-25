@@ -11,8 +11,8 @@ The idea worth caring about: most runbooks rot. A doc written in 2023 confidentl
 ```
 error log
    │
-   ├─► embed (gemini-embedding-001, RETRIEVAL_QUERY)
-   ├─► retrieve top runbook chunk (Qdrant, cosine)
+   ├─► embed (gemini-embedding-001, RETRIEVAL_QUERY) + BM25 sparse
+   ├─► retrieve top runbook chunk (Qdrant, dense + BM25 fused with DBSF)
    ├─► JUDGE: is this chunk still current?  (gemini-3.1-flash-lite, structured JSON)
    │        │
    │        ├── current ──────────────────────────┐
@@ -25,6 +25,41 @@ error log
 ```
 
 Retrieval is chunked **one chunk per runbook section**, because the section is the unit the judge reasons about — splitting mid-section hands it half an argument to rule on.
+
+### Hybrid retrieval
+
+Dense embedding blurs an exact token into its neighbourhood: `wal_keep_segments` becomes "some Postgres WAL setting". That is precisely wrong here, because the judge reasons about exact parameter and command names. So BM25 runs alongside it and the two are fused.
+
+Measured with `python -m evals.run_eval` over the 87-query golden set (73 on-topic, 14 negatives) against the full 14-chunk corpus:
+
+| | Success@1 | nDCG@5 | MRR |
+|---|---|---|---|
+| dense only | 91.8 | 96.1 | 95.0 |
+| BM25 only | 91.8 | 96.7 | 95.7 |
+| **DBSF fusion** | **94.5** | **97.9** | **97.3** |
+
+Success@1 is "did any acceptable chunk come back first" — the pipeline serves exactly one chunk, so that is the number that matters. Six queries have two acceptable answers (`FATAL: sorry, too many clients already` is covered by both the legacy runbook and `postgres-max-connections-reached.md`), which is why the metric is success rather than strict recall: recall would cap those at 0.5 and read as a failure when the pipeline did the right thing.
+
+**Success@5 is 100% for all three arms and is not reported above, because it is meaningless here** — the corpus is 14 chunks, so the top 5 is over a third of it. At this scale only the rank-1 and rank-sensitive metrics discriminate.
+
+Hybrid still earns its place, but by less than the old single-document benchmark suggested: DBSF beats either arm alone by ~2.7 points of Success@1, not by the 9/11 → 11/11 the previous measurement showed.
+
+All four of DBSF's remaining top-1 misses are near-neighbour confusions, which is the expected failure mode for a corpus built out of cousins:
+
+| query | wanted | got |
+|---|---|---|
+| "connection is rejected straight away" | connection-refused | connection-timeout |
+| `could not open file "recovery.conf"` | SECTION 3 (promotion) | SECTION 2 (disk full) |
+| `Exit Code: 137` | pod-oomkilled | crashloopbackoff |
+| "postgres is at max_connections, no pooler" | max-connections | pool-exhausted |
+
+**DBSF, not RRF.** RRF reduces every hit to its rank, which discards BM25's much larger score spread and scored *worse than BM25 alone*. DBSF normalizes each list's distribution before combining, so both signals still carry weight.
+
+**Fusion ranks; dense gates.** The `retrieved` event's `score` is still raw dense cosine, never the fused score, because a fused score cannot answer "did anything match at all" — it is derived from rank, so the top hit scores high by construction. Measured, RRF returned exactly `1.0` for every query including ones no runbook covered. Keeping the floor on cosine also keeps every number in this README comparable to the ones taken before hybrid existed.
+
+BM25 is ~60 lines in `copilot/sparse.py` rather than a dependency. `fastembed` is the obvious alternative and adds stemming and stopword handling, but it pulls in onnxruntime — ~200MB in an image on a free plan. Only the term-frequency half is computed locally; Qdrant applies IDF through `Modifier.IDF`, since IDF is a property of the collection and the collection is what Qdrant has.
+
+Switching `HYBRID_SEARCH` either way means re-running `python -m copilot.ingest`, because Qdrant cannot add or drop a sparse vector on a live collection. If the flag is on but the collection predates it, the pipeline logs a warning and serves dense-only rather than failing.
 
 ## Setup
 
@@ -145,29 +180,71 @@ All of `.env`. Model IDs live here deliberately — Gemini model strings change 
 | `JUDGE_MODEL` | `gemini-3.1-flash-lite` | cheap; thinking disabled |
 | `SYNTH_MODEL` | `gemini-3.8-flash` | |
 | `FALLBACK_MODELS` | `gemini-3.7-flash,gemini-3.1-flash-lite` | tried in order on 503/429 |
-| `MIN_MATCH_SCORE` | `0.55` | floor only; the judge decides coverage — see below |
+| `MIN_MATCH_SCORE` | `0.52` | floor only; the judge decides coverage — see below |
+| `HYBRID_SEARCH` | `true` | dense + BM25 fused; re-ingest after changing |
 
 ### The relevance gate
 
 Retrieval always returns *something*, even for a log no runbook covers. Without a floor, the pipeline would audit whatever came back and burn web searches on staleness irrelevant to the incident — an nginx SSL error retrieved the Postgres runbook and triggered searches for `wal_keep_segments`, then labelled the answer `web_patched` as though it had corrected something useful.
 
-**This used to be one cosine threshold, and that was wrong.** `MIN_MATCH_SCORE` was 0.62, and it was asked to decide relevance by itself. Measured over 16 queries with `scripts/measure_hybrid.py`, the two populations overlap:
+**This used to be one cosine threshold, and that was wrong.** `MIN_MATCH_SCORE` was 0.62, asked to decide relevance by itself. Measured now over 87 queries with `python -m evals.run_eval`, the two populations overlap by **0.1145**:
 
-| | dense top-1 |
+| | dense cosine of the served chunk |
 |---|---|
-| on-topic | 0.5602 – 0.7706 |
-| off-topic | 0.5621 – **0.6648** |
+| on-topic (73) | 0.5418 – 0.7886 |
+| off-topic (14) | 0.5638 – **0.6562** |
 
-No threshold separates them. The best any single value achieves is 14/16, which 0.62 already hit — tuning the number was exhausted, not under-tried. Both failures are semantic rather than numeric:
+No threshold separates them, and the gap is *wider* on the eleven-document corpus than it was on one. Cosine measures topic, not coverage. So coverage moved to the judge, which reads both the log and the excerpt and returns `covers_incident` alongside `current` — no extra API call, just one more field on a verdict already being requested.
 
-- `samples/pg_crash.log` scores **0.6648** against the disk-full section. It is a crash-recovery incident; the section is about disk space. It scores high because both are Postgres.
-- A short on-topic query (`password_encryption md5 no longer accepted`) scores **0.5602** and was refused, though SECTION 1 covers it on line 60. Short queries simply sit lower against long chunks.
+**At 0.52 the floor filters nothing.** This is the uncomfortable result and it is worth stating plainly: all 14 negatives clear it, including `x509: certificate signed by unknown authority` at 0.5655 and a MySQL deadlock at 0.6460. The floor produces zero false refusals and zero correct refusals. Every coverage decision in the system is the judge's.
 
-Cosine measures topic, not coverage. So coverage moved to the judge, which reads both the log and the excerpt and returns `covers_incident` alongside `current`. This costs no extra API call — it is one more field on a verdict already being requested.
+The sweep, from `--sweep`:
 
-`MIN_MATCH_SCORE` dropped to **0.55** and is now only a floor: below it the chunk is obvious garbage and not worth a judge call. Above it, the judge decides. Either way an uncovered incident yields `path: "no_match"`, no web searches, and synthesis told to say plainly that the library does not cover the error.
+| floor | precision | recall | F1 | false refusals | false accepts |
+|---|---|---|---|---|---|
+| 0.52 *(configured)* | 83.9 | 100.0 | 91.2 | 0 | 14 |
+| 0.55 | 83.7 | 98.6 | 90.6 | 1 | 14 |
+| 0.60 | 88.9 | 98.6 | 93.5 | 1 | 9 |
+| **0.62** | 94.7 | 97.3 | **95.9** | 2 | 4 |
+| 0.66 | 100.0 | 89.0 | 94.2 | 8 | 0 |
 
-Keep the floor **below** the lowest observed on-topic score, or it starts rejecting queries the runbook does cover — `tests/test_pipeline.py` asserts exactly that. Re-measure with `scripts/measure_hybrid.py` if you swap the embedding model or change chunking; these numbers are not portable.
+**Peak F1 is at 0.62 — the value that was abandoned.** 0.52 is kept anyway, and the reason is that F1 weights the two errors equally when they are not:
+
+- A **false refusal** is final. It skips the judge, so nothing downstream can overturn it, and the engineer is told the library does not cover an incident it does cover.
+- A **false accept** is survivable. It costs one judge call, and `covers_incident` is the thing actually designed to catch it.
+
+So the floor is set below the lowest observed on-topic score (0.5418, the query `password_encryption md5 no longer accepted`, which SECTION 1 covers) and does nothing else. It is a guard against a genuinely empty match, not a relevance classifier — and on this corpus it never fires.
+
+**The honest cost:** this puts 100% of coverage on a model the [risks section](#risks--honest-limitations) calls the shakiest link, and it means every off-topic log pays for a judge call. If judge cost or latency becomes the constraint, 0.62 buys back 10 of 14 false accepts for 2 false refusals — but that trade should be made deliberately and measured, not drifted into.
+
+`tests/test_pipeline.py` asserts the floor stays below the on-topic minimum, reading that bound from `evals/baseline.json` rather than a pasted constant. A second test asserts the populations still overlap — if a clean separating threshold ever appears, the judge-based gate is worth re-examining rather than kept because a comment says so.
+
+### Reproducing these numbers
+
+```bash
+python -m evals.run_eval              # the table above
+python -m evals.run_eval --sweep      # the threshold sweep
+python -m evals.run_eval --check      # CI gate; exits 1 on regression
+python -m evals.run_eval --refresh    # re-embed (costs quota)
+```
+
+The default run is **fully offline** — query vectors and a corpus snapshot are committed under `evals/cache/` (308 KB), so a change is measured against byte-identical embeddings rather than a freshly rolled one, and CI needs no API key, no Qdrant and no network. `.github/workflows/eval.yml` runs it with the credentials deliberately blanked, so a harness that tries to reach a provider fails the build instead of quietly spending quota on every PR.
+
+The golden set is `evals/golden_set.jsonl`: 87 hand-written queries across `exact_log`, `paraphrase`, `truncated`, `cousin_confuser`, `short_query` and `off_topic_negative`, 4–8 per corpus chunk. Hand-written rather than generated from each runbook's own Symptoms section, because querying a document with its own text makes retrieval succeed for a reason that will not hold on a real log.
+
+Per-category Success@1 under DBSF:
+
+| category | n | Success@1 |
+|---|---|---|
+| short_query | 10 | 100.0 |
+| exact_log | 19 | 94.7 |
+| paraphrase | 16 | 93.8 |
+| cousin_confuser | 15 | 93.3 |
+| truncated | 11 | 90.9 |
+
+Truncated fragments are the weakest, which is what you would expect — `Exit Code: 137` is two tokens and shares them with every other container failure.
+
+**What this does not measure.** The harness evaluates retrieval and the score floor. It cannot evaluate `covers_incident`, which needs a live judge call, so the gate numbers above are the floor alone. Given the floor currently refuses nothing, the system's real refusal behaviour is entirely unmeasured here — faithfulness and judge accuracy are the next thing to score.
 
 ## Risks & honest limitations
 
@@ -186,7 +263,7 @@ The fix was an explicit test — *"would this line actually break on a supported
 
   It is still not 100%. So the merge step is told explicitly that the audit's note is a detection hint, not an authority on the fix — where the web sources disagree with it, the web wins.
 
-**Tuning the threshold is the work.** If you change the runbook, re-check both directions: that a stale section trips, *and* that a current one doesn't. Run `scripts/measure_hybrid.py` rather than eyeballing one log — a single threshold looked fine for months against four sample logs and fell apart the moment it was measured against sixteen queries.
+**Tuning the threshold is the work.** If you change the runbook, re-check both directions: that a stale section trips, *and* that a current one doesn't. Run `python -m evals.run_eval` rather than eyeballing one log — a single threshold looked fine for months against four sample logs, held up against sixteen queries, and then turned out to refuse nothing at all when it was measured against eighty-seven.
 
 **Coverage now rests on the judge, which moves a known-imperfect model onto the refusal path.** The relevance floor is deliberately too low to catch a topical near-miss, so if the judge wrongly returns `covers_incident: true` the engineer gets advice for the wrong incident, and if it wrongly returns false they get a refusal for an incident the library does cover. The prompt leans against the second — a false refusal throws away a usable answer — which means the first is the likelier failure. Synthesis is the remaining backstop: it is told to say plainly when the excerpt does not cover the error rather than invent commands.
 
@@ -198,7 +275,11 @@ The fix was an explicit test — *"would this line actually break on a supported
 
 **Gemini Flash capacity is genuinely flaky.** Measured `503 UNAVAILABLE` on roughly one call in three during development. Hence retry-with-backoff plus model failover — without it the demo crashes at random. Once synthesis has emitted its first token the model is committed, so a mid-stream failure surfaces as an `error` event rather than a silent re-roll.
 
-**Only one runbook ships here.** `runbooks/database_guide.txt` is deliberately written as a stale 2023 Postgres doc so the self-correction path is demonstrable. Real coverage would need many more, and retrieval would need re-tuning at that scale.
+**The corpus is drafted, not production.** `runbooks/database_guide.txt` is deliberately written as a stale 2023 Postgres doc so the self-correction path is demonstrable. The other ten — five Postgres, five Kubernetes — were drafted with an LLM against a fixed template and then read line by line to cut invented flags and commands. They are not extracts from a real on-call library, and nobody should read the measured numbers below as evidence about one.
+
+The ten are deliberately close cousins within each domain (`connection-refused` vs `connection-timeout`, `pending-insufficient-resources` vs `pending-affinity-unsatisfiable`). That is the point: near-neighbour incidents are what retrieval actually has to separate, and a corpus of unrelated documents would make retrieval look better than it is.
+
+**They are also all current, which the judge has nothing to do with.** Only `database_guide.txt` is stale, so only it exercises the `web_patched` path. Ten accurate runbooks test retrieval and the `covers_incident` decision, not the staleness audit.
 
 ## Layout
 
@@ -209,6 +290,7 @@ copilot/
 ├─ clients.py       Gemini + Qdrant construction, retry/failover policy
 ├─ embeddings.py    embedding calls and L2 normalization
 ├─ chunking.py      splitting runbooks on SECTION headings
+├─ sparse.py        BM25 term-frequency vectors; Qdrant applies the IDF
 ├─ models.py        JudgeVerdict, StaleFinding, DiagnoseRequest
 ├─ prompts.py       loads prompts/*.md
 ├─ judge.py         the staleness audit
@@ -221,9 +303,16 @@ copilot/
 └─ cli.py           terminal client
 
 prompts/*.md        every prompt, as readable text rather than Python literals
-scripts/            measure_hybrid.py — retrieval benchmark, read-only, not shipped
-tests/              chunking, normalization, SSE framing, prompt assembly
-runbooks/           the corpus — one deliberately outdated Postgres runbook
+evals/
+├─ golden_set.jsonl  87 hand-labelled queries; the source of truth for relevance
+├─ run_eval.py       Success@k / nDCG / MRR / gate sweep, offline from cache
+├─ baseline.json     committed metrics; CI fails on a drop of >2 points
+└─ cache/            query + corpus vectors, so a run needs no API key
+
+scripts/            measure_hybrid.py — superseded by evals/, kept for its history
+.github/workflows/  eval.yml — lint, tests, and the offline retrieval gate
+tests/              chunking, normalization, BM25, SSE framing, prompt assembly
+runbooks/           the corpus — 1 deliberately outdated runbook + 10 drafted ones
 samples/*.log       example error logs, one per path
 static/index.html   browser UI, no build step
 ```
