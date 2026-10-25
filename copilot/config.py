@@ -57,13 +57,51 @@ FALLBACK_MODELS = [
 # because short queries sit lower against long chunks. Cosine measures topic, not
 # coverage, so coverage moved to the judge and this dropped to a floor that only
 # catches the genuinely unrelated.
-MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.55"))
+#
+# Re-derived at 0.52 once the score started describing the chunk actually served
+# rather than whatever dense retrieval ranked first (see pipeline.retrieve). Those
+# are different points under fusion, and the chunk-level scores run lower:
+#
+#   on-topic  selected-chunk cosine: 0.5418 .. 0.7706
+#   off-topic selected-chunk cosine: 0.4981 .. 0.6644
+#
+# 0.55 would now refuse `password_encryption md5 no longer accepted` at 0.5418,
+# which SECTION 1 covers on line 60. The floor must stay BELOW the lowest on-topic
+# score — it is a garbage filter, and every false refusal it causes is one the judge
+# never gets the chance to overturn.
+MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.52"))
 
 # Each finding costs a web search. The judge orders findings by severity, so the
 # tail is the cheapest thing to drop.
 MAX_SEARCHES = int(os.getenv("MAX_SEARCHES", "3"))
 
-MAX_CHUNK_CHARS = int(os.getenv("MAX_CHUNK_CHARS", "2600"))
+# Sized so each runbook stays ONE chunk. Measured, the corpus runs 2720-3431 chars
+# per file; at the previous 2600 every single one overflowed and was split by the
+# blank-line fallback in chunking.py, which yields fragments like a bare Prevention
+# section under a "(continued)" heading. Such a fragment is incident-anonymous — it
+# names no symptom — so retrieval matches it for the wrong logs and the judge is
+# asked whether an excerpt covers an incident the excerpt never mentions.
+#
+# Raise this if a runbook legitimately grows past it. Do NOT lower it to force
+# finer chunks: the unit the judge reasons about is one incident.
+MAX_CHUNK_CHARS = int(os.getenv("MAX_CHUNK_CHARS", "3600"))
+
+# Name of the BM25 sparse vector stored beside the dense one. Qdrant requires sparse
+# vectors to be named even when the dense vector is not.
+SPARSE_VECTOR = "bm25"
+
+# Hybrid retrieval: dense and BM25 both searched, then fused. Off means dense only.
+#
+# Turning this on requires a collection ingested WITH sparse vectors — Qdrant cannot
+# add a sparse config to an existing collection, so switching means re-running
+# `python -m copilot.ingest`. The pipeline checks for the sparse vector at query time
+# and falls back to dense rather than failing, so a stale collection degrades instead
+# of erroring, but it will quietly give you dense-only results until you re-ingest.
+HYBRID_SEARCH = os.getenv("HYBRID_SEARCH", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 APP_API_KEY = os.getenv("APP_API_KEY", "").strip()
 AUTH_ENABLED = bool(APP_API_KEY)
