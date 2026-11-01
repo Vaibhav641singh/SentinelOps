@@ -1,0 +1,52 @@
+name: eval
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install -e ".[dev,eval]"
+
+      - name: Lint
+        run: ruff check copilot/ tests/ evals/ scripts/
+
+      - name: Unit tests
+        run: pytest -q
+
+      # Runs entirely from the committed vectors in evals/cache/ — no API key, no
+      # Qdrant, no network. That is the whole point of the cache: a threshold or
+      # prompt change is measured against byte-identical embeddings, so a diff in
+      # the numbers is caused by the diff in the code and nothing else.
+      #
+      # Deliberately given no credentials. If the harness ever tries to reach a
+      # provider, this step fails rather than quietly spending quota on every PR.
+      - name: Retrieval eval (offline)
+        env:
+          GEMINI_API_KEY: ""
+          QDRANT_URL: ""
+          QDRANT_API_KEY: ""
+        run: python -m evals.run_eval --check
+
+      - name: Eval report
+        if: always()
+        env:
+          GEMINI_API_KEY: ""
+          QDRANT_URL: ""
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m evals.run_eval >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

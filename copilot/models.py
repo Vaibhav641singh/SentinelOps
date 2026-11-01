@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from .sanitize import MAX_LOG_CHARS
+
 
 class StaleFinding(BaseModel):
     item: str = Field(description="The exact parameter, command, file, or version at fault")
@@ -15,8 +17,20 @@ class JudgeVerdict(BaseModel):
     `findings` is a list rather than one `reason` because a single-reason schema
     let the model stop at the first problem it noticed — a section typically
     rots in several places at once.
+
+    `covers_incident` answers a different question from `current`: not "is this
+    advice stale" but "is this advice even about the right incident". Cosine
+    similarity cannot answer it — a Postgres crash log scores 0.66 against a
+    disk-full section because both are Postgres, not because one fixes the other.
+    See the comment on MIN_MATCH_SCORE in config.py for the measurement.
     """
 
+    covers_incident: bool = Field(
+        description=(
+            "True if this excerpt addresses the incident in the error log. "
+            "False when it is merely about the same system or product."
+        )
+    )
     current: bool = Field(description="True only if NOTHING in the excerpt is outdated")
     reason: str = Field(description="One line summarising the verdict overall")
     findings: list[StaleFinding] = Field(
@@ -25,4 +39,17 @@ class JudgeVerdict(BaseModel):
 
 
 class DiagnoseRequest(BaseModel):
-    error_log: str = Field(..., min_length=1, examples=["FATAL: sorry, too many clients already"])
+    """The one input this service does not control.
+
+    `max_length` is a contract, not a safeguard: an oversized paste gets a 422
+    naming the limit rather than being silently truncated into something the
+    engineer did not send. The pipeline caps again anyway, because the HTTP layer
+    is not the only possible caller.
+    """
+
+    error_log: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_LOG_CHARS,
+        examples=["FATAL: sorry, too many clients already"],
+    )

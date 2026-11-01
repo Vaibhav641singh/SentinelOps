@@ -7,21 +7,34 @@ from .clients import with_failover
 from .config import JUDGE_MODEL
 from .models import JudgeVerdict
 from .prompts import JUDGE_SYSTEM, JUDGE_USER
+from .sanitize import fence
 
 
 async def judge_runbook(
-    gemini: genai.Client, error_log: str, chunk: str, source: str, today: str
+    gemini: genai.Client,
+    error_log: str,
+    chunk: str,
+    source: str,
+    today: str,
+    nonce: str,
 ) -> JudgeVerdict:
     """Ask whether a retrieved runbook excerpt is still safe to follow.
 
     Returns a schema-validated verdict so the caller branches on a boolean
     rather than parsing prose.
+
+    The log is fenced with a per-request nonce. It used to sit under a bare
+    `ERROR LOG:` label whose only terminator was the next uppercase label, which
+    pasted text could write for itself — ending the untrusted section early and
+    continuing in one the model read as the runbook.
     """
 
     async def call(model: str):
         return await gemini.aio.models.generate_content(
             model=model,
-            contents=JUDGE_USER.format(error_log=error_log, source=source, chunk=chunk),
+            contents=JUDGE_USER.format(
+                error_log=fence("error_log", error_log, nonce), source=source, chunk=chunk
+            ),
             config=types.GenerateContentConfig(
                 system_instruction=JUDGE_SYSTEM.format(today=today),
                 response_mime_type="application/json",
@@ -39,8 +52,12 @@ async def judge_runbook(
 
     if not isinstance(verdict, JudgeVerdict):
         # An unreadable verdict degrades to plain runbook advice rather than
-        # firing a pointless web search.
-        return JudgeVerdict(current=True, reason="Judge returned no usable verdict.")
+        # firing a pointless web search. It assumes coverage: retrieval already
+        # cleared the floor, and refusing on a parse failure would turn a model
+        # glitch into "no runbook covers this", which is a lie the engineer acts on.
+        return JudgeVerdict(
+            covers_incident=True, current=True, reason="Judge returned no usable verdict."
+        )
 
     # A verdict claiming staleness with nothing to show for it would send an
     # empty query to the search step, so trust the findings over the boolean.

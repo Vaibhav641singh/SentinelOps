@@ -1,9 +1,18 @@
 import json
+import pathlib
 
 from copilot.config import MIN_MATCH_SCORE
 from copilot.models import JudgeVerdict, StaleFinding
-from copilot.pipeline import PATH_NO_MATCH, PATH_RUNBOOK, PATH_WEB_PATCHED, sse
+from copilot.pipeline import (
+    PATH_NO_MATCH,
+    PATH_RUNBOOK,
+    PATH_WEB_PATCHED,
+    choose_path,
+    sse,
+)
 from copilot.research import FAILED, NOT_SEARCHED, Hit, Research, format_research
+
+BASELINE = pathlib.Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
 
 
 def parse_frame(frame: str):
@@ -32,24 +41,106 @@ def test_sse_payload_stays_on_one_line():
 
 
 def test_path_selection():
-    def choose(weak: bool, current: bool) -> str:
-        return PATH_NO_MATCH if weak else (PATH_RUNBOOK if current else PATH_WEB_PATCHED)
-
-    assert choose(weak=True, current=True) == PATH_NO_MATCH
-    assert choose(weak=True, current=False) == PATH_NO_MATCH  # weak wins
-    assert choose(weak=False, current=True) == PATH_RUNBOOK
-    assert choose(weak=False, current=False) == PATH_WEB_PATCHED
+    assert choose_path(covered=False, current=True) == PATH_NO_MATCH
+    assert choose_path(covered=False, current=False) == PATH_NO_MATCH  # uncovered wins
+    assert choose_path(covered=True, current=True) == PATH_RUNBOOK
+    assert choose_path(covered=True, current=False) == PATH_WEB_PATCHED
 
 
-def test_relevance_gate_threshold_sits_between_observed_scores():
-    # Measured: on-topic logs 0.74-0.78, unrelated nginx error 0.55.
-    assert 0.57 < MIN_MATCH_SCORE < 0.74
+def test_uncovered_incident_is_no_match_however_current_the_runbook():
+    # pg_crash.log scored 0.6648 against the disk-full section and was reported as
+    # web_patched. It is the same product, not the same incident. Whether that
+    # section is up to date has no bearing on an incident it does not address.
+    assert choose_path(covered=False, current=True) == PATH_NO_MATCH
+
+
+# How many covered queries the floor is allowed to refuse outright. Not zero:
+# at a floor low enough to refuse nothing, the floor also CATCHES nothing — all
+# 14 negatives cleared 0.52 and each one cost a judge call. 0.62 buys 8 of 12
+# off-topic refusals for exactly 2 covered ones, which was judged worth it.
+#
+# This is a budget, not a target. A refusal here is final: it skips the judge, so
+# nothing downstream can overturn it and the engineer is told the library does
+# not cover an incident it does. Raising the floor spends from this budget, and
+# the build fails rather than letting that happen quietly.
+MAX_FALSE_REFUSALS = 2
+
+
+def test_the_floor_refuses_no_more_covered_queries_than_budgeted():
+    # Read from the eval baseline rather than pasted in. This used to be a
+    # hand-copied 0.5418 — the one number in the suite that could silently stop
+    # describing reality, since nothing recomputed it and the corpus has grown
+    # from one runbook to eleven. Regenerate with:
+    #
+    #     python -m evals.run_eval --write-baseline
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    assert baseline["threshold"] == MIN_MATCH_SCORE, (
+        f"baseline was measured at {baseline['threshold']} but the configured floor "
+        f"is {MIN_MATCH_SCORE} — re-run: python -m evals.run_eval --write-baseline"
+    )
+    refused = baseline["arms"]["dbsf"]["gate"]["false_refusals"]
+    assert refused <= MAX_FALSE_REFUSALS, (
+        f"floor {MIN_MATCH_SCORE} refuses {refused} covered queries "
+        f"({', '.join(baseline['false_refusal_ids'])}); budget is {MAX_FALSE_REFUSALS}. "
+        "Each is final — the judge never sees them."
+    )
+
+
+def test_the_floor_still_earns_its_place():
+    # The mirror of the budget test. A floor that refuses nothing is not a
+    # conservative floor, it is an absent one, and every off-topic log then costs
+    # a judge call. If this ever fails, the floor has drifted back down to
+    # decoration and should either be raised or removed honestly.
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    accepts = baseline["arms"]["dbsf"]["gate"]["false_accepts"]
+    negatives = sum(
+        c["n"] for c in baseline["by_category"].values() if c.get("negatives")
+    )
+    assert accepts < negatives, (
+        f"the floor lets through all {negatives} off-topic queries — it is filtering "
+        "nothing, and coverage rests entirely on the judge"
+    )
+
+
+def test_baseline_records_the_overlap_that_justifies_the_judge():
+    # Coverage lives in the judge because cosine cannot answer it. That claim is
+    # only true while the two populations actually overlap — if a clean separating
+    # threshold ever appears, the architecture should be revisited rather than
+    # left as it is because a comment says so.
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    assert baseline["gap"] <= 0, (
+        f"on-topic and off-topic scores now separate by {baseline['gap']:.4f}; "
+        "a plain threshold may be sufficient and the judge-based gate is worth re-examining"
+    )
+
+
+def test_done_reports_only_findings_that_reached_the_answer():
+    # The judge can flag staleness in a runbook it also declared irrelevant. Those
+    # findings sit next to `sources` in the done event, where they read as researched
+    # corrections to the advice given — but no research ran and the runbook was
+    # discarded. Only findings carried by `research` shaped the answer.
+    finding = StaleFinding(item="wal_keep_segments", problem="removed", search_query="q")
+    research = [Research(finding, "ddgs", [Hit("PG13", "https://example.org", "renamed")])]
+
+    def done_findings(research):
+        return [group.finding.item for group in research] if research else []
+
+    assert done_findings(research) == ["wal_keep_segments"]
+    assert done_findings(None) == []  # no_match, however much the judge found
+
+
+def test_unsearched_findings_are_still_reported_as_findings():
+    # Past MAX_SEARCHES there are no hits, but these DO reach the merge prompt and
+    # are corrected there marked [unverified], so they belong in the done event.
+    finding = StaleFinding(item="recovery.conf", problem="removed in PG12", search_query="q")
+    research = [Research(finding, NOT_SEARCHED)]
+    assert [group.finding.item for group in research] == ["recovery.conf"]
 
 
 def test_verdict_with_no_findings_is_treated_as_current():
     # A "stale" verdict with nothing to show for it would send an empty query
     # to the search step.
-    verdict = JudgeVerdict(current=False, reason="vague", findings=[])
+    verdict = JudgeVerdict(covers_incident=True, current=False, reason="vague", findings=[])
     if not verdict.current and not verdict.findings:
         verdict.current = True
     assert verdict.current

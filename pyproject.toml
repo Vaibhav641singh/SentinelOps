@@ -18,7 +18,10 @@ dependencies = [
 
 [project.optional-dependencies]
 cli = ["requests", "typer", "rich"]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+# Only the eval harness needs numpy — it is not a runtime dependency, and the
+# deployed image must not carry it.
+eval = ["numpy"]
 
 [project.scripts]
 copilot = "copilot.cli:app"
@@ -32,3 +35,11 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+# Pinned explicitly rather than left to ruff's default. The default set widens
+# between releases, so an unpinned CI job starts failing on code nobody touched.
+# This is ruff's current default plus import sorting. Widening it to E501 or B
+# is a worthwhile cleanup, but it is a reformat of the whole package rather than
+# a lint fix, so it belongs in its own change.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
